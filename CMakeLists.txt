@@ -22,4 +22,5 @@ add_subdirectory(core)
 add_subdirectory(modules)
 add_subdirectory(apps)
 add_subdirectory(tests)
+add_subdirectory(docs)
 
