@@ -1,10 +1,7 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.23)
 
 project(pdm LANGUAGES CXX)
 
-set(CMAKE_AUTOUIC ON)
-set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTORCC ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,3 +21,20 @@ add_subdirectory(apps)
 add_subdirectory(tests)
 add_subdirectory(docs)
 
+
+file(GLOB_RECURSE PDM_PROJECT_FILES CONFIGURE_DEPENDS
+    ${CMAKE_SOURCE_DIR}/apps/*
+    ${CMAKE_SOURCE_DIR}/core/*
+    ${CMAKE_SOURCE_DIR}/modules/*
+    ${CMAKE_SOURCE_DIR}/shared/*
+    ${CMAKE_SOURCE_DIR}/tests/*
+    ${CMAKE_SOURCE_DIR}/docs/*
+)
+
+list(APPEND PDM_PROJECT_FILES
+    ${CMAKE_SOURCE_DIR}/README.md
+    ${CMAKE_SOURCE_DIR}/.gitignore
+    ${CMAKE_SOURCE_DIR}/.gitmodules
+)
+
+add_custom_target(project_files SOURCES ${PDM_PROJECT_FILES})
