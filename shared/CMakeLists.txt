@@ -5,6 +5,7 @@ target_sources(shared INTERFACE
     BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
     FILES
         document.h
+        imodule.h
 )
 
 
