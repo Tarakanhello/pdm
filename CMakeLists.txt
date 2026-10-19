@@ -30,6 +30,7 @@ file(GLOB_RECURSE PDM_PROJECT_FILES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/tests/*
     ${CMAKE_SOURCE_DIR}/docs/*
     ${CMAKE_SOURCE_DIR}/docs/modules/*
+    ${CMAKE_SOURCE_DIR}/docs/architecture/*
 )
 
 list(APPEND PDM_PROJECT_FILES
