@@ -3,7 +3,7 @@
 
 #include <string>
 
-namespace pdm
+namespace pdm::shared
 {
     enum class DocumentTypeCode
     {

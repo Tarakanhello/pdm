@@ -9,20 +9,20 @@ TEST_CASE("Document: creation and field initialization", "[document]")
 {
     SECTION("Default constructor creates an object")
     {
-        pdm::Document doc{};
+        pdm::shared::Document doc{};
         // Проверяем, что объект существует и его поля имеют значения по умолчанию
         REQUIRE(doc.number.empty());
         REQUIRE(doc.name.empty());
-        REQUIRE(doc.code == pdm::DocumentTypeCode::Unknown);
+        REQUIRE(doc.code == pdm::shared::DocumentTypeCode::Unknown);
     }
 
     SECTION("Fields are initialized correctly")
     {
-        pdm::Document doc{"716.36.15", "Полка", pdm::DocumentTypeCode::AssemblyDrawing };
+        pdm::shared::Document doc{"716.36.15", "Полка", pdm::shared::DocumentTypeCode::AssemblyDrawing };
 
         REQUIRE(doc.number == "716.36.15");
         REQUIRE(doc.name == "Полка");
-        REQUIRE(doc.code == pdm::DocumentTypeCode::AssemblyDrawing);
+        REQUIRE(doc.code == pdm::shared::DocumentTypeCode::AssemblyDrawing);
     }
 }
 
@@ -32,11 +32,11 @@ TEST_CASE("Document: creation and field initialization", "[document]")
 TEST_CASE("Document: copy", "[document][copy]")
 {
     // Создаём исходный объект с известными значениями
-    pdm::Document original{"716.36.15", "Полка", pdm::DocumentTypeCode::AssemblyDrawing};
+    pdm::shared::Document original{"716.36.15", "Полка", pdm::shared::DocumentTypeCode::AssemblyDrawing};
 
     SECTION("Copy constructor")
     {
-        pdm::Document copy{ original };
+        pdm::shared::Document copy{ original };
 
         // Проверяем, что все поля скопированы правильно
         CHECK(copy.number == original.number);
@@ -46,7 +46,7 @@ TEST_CASE("Document: copy", "[document][copy]")
 
     SECTION("Copy assignment operator")
     {
-        pdm::Document copy;
+        pdm::shared::Document copy;
         copy = original;
 
         CHECK(copy.number == original.number);
@@ -56,19 +56,19 @@ TEST_CASE("Document: copy", "[document][copy]")
 
     SECTION("Modifying the copy does not affect the original")
     {
-        pdm::Document copy{ original };
+        pdm::shared::Document copy{ original };
         copy.number = "321.125.765";
         copy.name   = "Кронштейн";
-        copy.code   = pdm::DocumentTypeCode::TechnicalSpecifications;
+        copy.code   = pdm::shared::DocumentTypeCode::TechnicalSpecifications;
 
         REQUIRE(copy.number == "321.125.765");
         REQUIRE(copy.name   == "Кронштейн");
-        REQUIRE(copy.code   == pdm::DocumentTypeCode::TechnicalSpecifications);
+        REQUIRE(copy.code   == pdm::shared::DocumentTypeCode::TechnicalSpecifications);
 
         // Оригинал должен остаться неизменным
         CHECK(original.number == "716.36.15");
         CHECK(original.name   == "Полка");
-        CHECK(original.code   == pdm::DocumentTypeCode::AssemblyDrawing);
+        CHECK(original.code   == pdm::shared::DocumentTypeCode::AssemblyDrawing);
     }
 
     SECTION("Russian names work")
