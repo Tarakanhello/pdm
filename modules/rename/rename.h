@@ -16,7 +16,7 @@ namespace pdm::modules
      */
     namespace rename::keys
     {
-        inline constexpr std::string_view excelPath = "excel_path";     ///< Путь к файлу спецификации Excel.
+        inline constexpr std::string_view excelFolder = "excel_folder";     ///< Путь к файлу спецификации Excel.
         inline constexpr std::string_view scansFolder = "scans_folder"; ///< Путь к папке с отсканированными файлами.
     } // end namespace rename::keys
 
@@ -46,7 +46,7 @@ namespace pdm::modules
 
         /**
          * @brief Запустить процесс переименования.
-         * @param params Параметры задачи (должны содержать ключи excelPath и scansFolder).
+         * @param params Параметры задачи (должны содержать ключи excelFolder и scansFolder).
          */
         void execute(const shared::JobParams& params) override;
     };

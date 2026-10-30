@@ -1,6 +1,12 @@
 #include "rename.h"
 
+#include <filesystem>
 #include <iostream>
+#include <vector>
+
+#include "qxlsx_reader.h"
+#include "algorithms.h"
+
 
 namespace pdm::modules
 {
@@ -11,18 +17,41 @@ namespace pdm::modules
 
         // Проверяем, передало ли ядро нужные пути
 
-        if(!params.has(rename::keys::excelPath) || !params.has(rename::keys::scansFolder))
+        if(!params.has(rename::keys::excelFolder) || !params.has(rename::keys::scansFolder))
         {
             std::cerr << "[RenameModule] Error: paths ways has not found!\n";
             return;
         }
 
-        std::string excelPath{ params.get(rename::keys::excelPath) };
-        std::string scansFolder{ params.get(rename::keys::scansFolder) };
 
+        rename::QxlsxReader xlsxReader{};
 
-        std::cout << "Specification file path: " << excelPath << '\n';
-        std::cout << "Scan files path: " << scansFolder << '\n';
+        try
+        {
+            std::string filePath{ shared::algorithms::getFileFromFolder(params.get(rename::keys::excelFolder), ".xlsx") };
+            bool opened{ xlsxReader.open(filePath) };
+            if(!opened)
+            {
+                std::cerr << "[RenameModule] Error: can not download file " << filePath << '\n';
+                return;
+            }
+            std::cout << "[RenameModule] File succesfully loaded.\n";
+        }
+        catch(const std::exception& e)
+        {
+            std::cerr << e.what() << '\n';
+            return;
+        }
+
+        auto documents{ xlsxReader.readDocuments() };
+
+        std::cout << "Readed documents:\n";
+        for(const auto& doc : documents)
+        {
+            std::cout << "  - " << doc.number << " - " << doc.name << '\n';
+        }
+
+        std::cout << "Scan files path: " << params.get(rename::keys::scansFolder) << '\n';
     }
 
 } // end namespcae pdm

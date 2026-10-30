@@ -17,8 +17,8 @@ int main()
     // 3. Готовим параметры для задачи
     pdm::shared::JobParams params;
     // Используем константы из модуля, чтобы не опечататься
-    params.set(pdm::modules::rename::keys::excelPath, "C:/spec.xls");
-    params.set(pdm::modules::rename::keys::scansFolder, "C:/scans");
+    params.set(pdm::modules::rename::keys::excelFolder, "C:/Users/TarakanovVV/Downloads/someTestFiles/");
+    params.set(pdm::modules::rename::keys::scansFolder, "C:/Users/TarakanovVV/Downloads/someTestFiles/scans");
 
     // 4. Просим ядро запустить модуль по его ID
     core.runModule("rename", params);
