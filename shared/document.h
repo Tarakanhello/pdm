@@ -3,8 +3,17 @@
 
 #include <string>
 
+/**
+ * @brief Пространство имен для общих типов и интерфейсов системы PDM.
+ */
 namespace pdm::shared
 {
+    /**
+     * @brief Классификатор типов конструкторских документов по ГОСТ 2.102.
+     *
+     * Используется для определения того, как обрабатывать документ.
+     * Например, у чертежа детали есть материал, у ТУ — нет.
+     */
     enum class DocumentTypeCode
     {
         DetailDrawing,                      ///< ЧД  Чертеж детали // основной документ код может отсутствовать
@@ -147,11 +156,19 @@ namespace pdm::shared
         Unknown,                            ///< Тип ещё не определён
     }; // end enum DocumentTypeCode
 
+
+
+    /**
+     * @brief Основная сущность предметной области — документ.
+     *
+     * Содержит минимальный набор полей, необходимых для идентификации документа
+     * на ранних этапах работы системы.
+     */
     struct Document
     {
-        std::string number;
-        std::string name;
-        DocumentTypeCode code{ DocumentTypeCode::Unknown };
+        std::string number;                                 ///< Обозначение (номер) документа, например "13084-1-00000-00".
+        std::string name;                                   ///< Наименование документа, например "Домкрат для ЖДВ".
+        DocumentTypeCode code{ DocumentTypeCode::Unknown }; ///< Тип документа по ГОСТ (по умолчанию Unknown).
     };
 } // end namespace pdm
 
