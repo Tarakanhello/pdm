@@ -1,10 +1,8 @@
 #ifndef QXLSX_READER_H
 #define QXLSX_READER_H
 
-#include <filesystem>
 #include <memory>
 #include <string>
-#include <stdexcept>
 #include <vector>
 
 #include <xlsxdocument.h>
@@ -12,7 +10,7 @@
 #include "document.h"
 #include "iexcel_reader.h"
 
-namespace pdm::modules::rename
+namespace pdm::infrastructure
 {
 
     class QxlsxReader final : public pdm::shared::IExcelReader

@@ -4,6 +4,8 @@
 #include "core.h"
 #include "rename.h"
 
+#include "qxlsx_reader.h"
+
 int main()
 {
     std::cout << "=== Run PDM System ===\n";
@@ -12,7 +14,7 @@ int main()
     pdm::Core core;
 
     // 2. Создаем модуль и отдаем его ядру
-    core.addModule(std::make_unique<pdm::modules::Rename>());
+    core.addModule(std::make_unique<pdm::modules::Rename>(std::make_unique<pdm::infrastructure::QxlsxReader>()));
 
     // 3. Готовим параметры для задачи
     pdm::shared::JobParams params;

@@ -12,6 +12,17 @@ namespace pdm::shared::algorithms
 {
 
 
+    /**
+     * @brief Найти единственный файл с заданным расширением в папке.
+     *
+     * Проверяет, что папка существует. Ищет файлы с указанным расширением.
+     * Если файлов ноль или больше одного — выбрасывает исключение (защита от неоднозначности).
+     *
+     * @param folder Путь к папке для поиска.
+     * @param extension Искомое расширение (например, ".xlsx").
+     * @return Полный путь к найденному файлу.
+     * @throws std::runtime_error Если папки нет, или файлов не найдено, или их больше одного.
+     */
     inline std::string getFileFromFolder(const std::filesystem::path& folder, const std::string& extension)
     {
         if(folder.empty())

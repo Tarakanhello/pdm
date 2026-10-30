@@ -2,9 +2,7 @@
 
 #include <filesystem>
 #include <iostream>
-#include <vector>
 
-#include "qxlsx_reader.h"
 #include "algorithms.h"
 
 
@@ -24,12 +22,12 @@ namespace pdm::modules
         }
 
 
-        rename::QxlsxReader xlsxReader{};
-
         try
         {
+            // Ищем файл .xlsx в папке через утилиту из shared
             std::string filePath{ shared::algorithms::getFileFromFolder(params.get(rename::keys::excelFolder), ".xlsx") };
-            bool opened{ xlsxReader.open(filePath) };
+
+            bool opened{ m_reader->open(filePath) };
             if(!opened)
             {
                 std::cerr << "[RenameModule] Error: can not download file " << filePath << '\n';
@@ -43,7 +41,8 @@ namespace pdm::modules
             return;
         }
 
-        auto documents{ xlsxReader.readDocuments() };
+        // Получаем чистые данные, без Qt
+        auto documents{ m_reader->readDocuments() };
 
         std::cout << "Readed documents:\n";
         for(const auto& doc : documents)

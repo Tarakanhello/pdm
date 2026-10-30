@@ -15,6 +15,7 @@ endif()
 
 add_subdirectory(third_party)
 add_subdirectory(shared)
+add_subdirectory(infrastructure)
 add_subdirectory(core)
 add_subdirectory(modules)
 add_subdirectory(apps)
@@ -29,6 +30,7 @@ file(GLOB_RECURSE PDM_PROJECT_FILES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/shared/*
     ${CMAKE_SOURCE_DIR}/tests/*
     ${CMAKE_SOURCE_DIR}/docs/*
+    ${CMAKE_SOURCE_DIR}/infrastructure/*
     ${CMAKE_SOURCE_DIR}/docs/modules/*
     ${CMAKE_SOURCE_DIR}/docs/architecture/*
 )
