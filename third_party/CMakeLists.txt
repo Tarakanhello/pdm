@@ -6,3 +6,4 @@ else()
 endif()
 
 add_subdirectory(Catch2)
+add_subdirectory(QXlsx/QXlsx)
