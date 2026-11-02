@@ -39,9 +39,9 @@ namespace pdm::infrastructure
          * @brief Прочитать список документов из открытого файла Excel.
          *
          * @details
-         * Метод проходит по строкам листа сверху вниз, начиная с первой строки.
+         * Метод проходит по строкам листа сверху вниз, используя реальный размер таблицы (dimension().lastRow()).
          * Для каждой строки проверяются условия:
-         * 1. Если в столбце G (Наименование) встречается "Стандартные изделия",
+         * 1. Если в столбце G (Наименование) встречается "Стандартные изделия" или "Прочие изделия",
          *    чтение немедленно прекращается (всё, что ниже — болты и гайки, их не переименовываем).
          * 2. Если строка пустая (нет ни обозначения, ни наименования), она пропускается.
          * 3. Если в столбце V (Примечание) стоит "БЧ", строка пропускается (нет скана).
@@ -57,9 +57,15 @@ namespace pdm::infrastructure
         {
             std::vector<pdm::shared::Document> documents;
 
-            int row{ 1 };
+            const int lastRow{ m_xlsx->dimension().lastRow() };
 
-            while(true)
+            // Если таблица пустая, сразу выходим
+            if (lastRow <= 0)
+            {
+                return documents;
+            }
+
+            for(int row{ 1 }; row <= lastRow; ++row)
             {
                 // Читаем значения из нужных ячеек.
                 // Столбцы: C=3 (Обозначение), G=7 (Наименование), V=22 (Примечание)
@@ -68,8 +74,10 @@ namespace pdm::infrastructure
                 QString cellV{ m_xlsx->read(row, 22).toString().trimmed() };
 
                 // Если достигли раздела "Стандартные изделия" — останавливаемся
-                if(cellG.contains("Стандариные изделия", Qt::CaseInsensitive) ||
-                    cellG.contains("Прочие изделия", Qt::CaseInsensitive))
+                if(cellC.isEmpty() &&
+                                     (cellG.contains("Стандартные изделия", Qt::CaseInsensitive) ||
+                                      cellG.contains("Прочие изделия", Qt::CaseInsensitive) ||
+                                      cellG.contains("Материалы", Qt::CaseInsensitive)))
                 {
                     break;
                 }
@@ -77,21 +85,12 @@ namespace pdm::infrastructure
                 // Пропускаем пустые строки и строки-заголовки
                 if(cellC.isEmpty() && cellG.isEmpty())
                 {
-                    ++row;
-
-                    // Защита от бесконечного цикла, если файл закончился
-                    if(row > 10'000)
-                    {
-                        break;
-                    }
-
                     continue;
                 }
 
                 // Пропускаем документы без чертежей (БЧ)
                 if(cellV.contains("БЧ", Qt::CaseInsensitive))
                 {
-                    ++row;
                     continue;
                 }
 
@@ -104,8 +103,6 @@ namespace pdm::infrastructure
 
                     documents.emplace_back(std::move(doc));
                 }
-
-                ++row;
             }
             // Читаем ячейку C2 (строка 2, колонка 3 — в QXlsx колонки нумеруются с 1)
 
