@@ -33,9 +33,9 @@ namespace pdm::shared
          * @param key Ключ параметра (например, "excel_path").
          * @param value Значение параметра (например, "C:/spec.xls").
          */
-        void set(std::string_view key, std::string value)
+        void set(std::string_view key, std::string_view value)
         {
-            m_params.emplace(std::string{ key }, std::move(value));
+            m_params.emplace(key, value);
         }
 
         /**

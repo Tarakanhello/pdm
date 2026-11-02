@@ -3,7 +3,5 @@ add_executable(core-server
 )
 
 target_link_libraries(core-server PRIVATE
-    core
-    rename
-    infrastructure
+    composition
 )

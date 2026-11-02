@@ -4,6 +4,7 @@
 #include <string_view>
 
 #include "job_params.h"
+#include "module_id.h"
 
 namespace pdm::shared
 {
@@ -28,7 +29,7 @@ namespace pdm::shared
          * @brief Получить уникальный строковый идентификатор модуля.
          * @return Уникальный ID (например, "rename").
          */
-        virtual std::string_view getId() const = 0;
+        virtual ModuleId getId() const = 0;
 
         /**
          * @brief Получить человекочитаемое имя модуля.

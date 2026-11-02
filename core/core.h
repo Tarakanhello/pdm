@@ -23,15 +23,14 @@ namespace pdm
      */
     class Core final
     {
-    private:
         /**
          * @brief Реестр (хранилище) всех зарегистрированных модулей.
          *
          * Используется std::unordered_map для быстрого поиска модуля по его ID
-         * за константное время O(1). Ключом является строковый ID модуля,
+         * за константное время O(1). Ключом является enum class ID модуля,
          * значением — умный указатель unique_ptr, который владеет модулем.
          */
-        std::unordered_map<std::string, std::unique_ptr<shared::IModule>> m_modules;
+        std::unordered_map<shared::ModuleId, std::unique_ptr<shared::IModule>> m_modules;
 
     public:
         Core() = default;
@@ -49,16 +48,15 @@ namespace pdm
         void addModule(std::unique_ptr<shared::IModule> module);
 
         /**
-         * @brief Запустить зарегистрированный модуль по его ID.
+         * @brief Запустить зарегистрированный модуль по его имени.
          *
-         * Выполняет поиск модуля в реестре. Если модуль найден, вызывается его
-         * метод execute() с переданными параметрами. Если не найден — выводится
-         * сообщение об ошибке.
+         * Выполняет парсинг строки в ModuleId, затем ищет модуль в реестре.
+         * Если модуль найден, вызывается его метод execute() с переданными параметрами.
          *
-         * @param moduleId Строковый идентификатор модуля (например, "rename").
-         * @param params Набор параметров (JobParams), передаваемых модулю для выполнения.
+         * @param moduleName Строковый идентификатор модуля (например, "rename").
+         * @param params Набор параметров (JobParams), передаваемых модулю.
          */
-        void runModule(const std::string& moduleId, const shared::JobParams& params);
+        void runModule(std::string_view moduleName, const shared::JobParams& params);
 
     };
 

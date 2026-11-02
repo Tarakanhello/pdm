@@ -1,29 +1,17 @@
 #ifndef RENAME_H
 #define RENAME_H
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
 
 #include "imodule.h"
 #include "iexcel_reader.h"
+#include "module_id.h"
 
 namespace pdm::modules
 {
-/**
-     * @brief Ключи параметров, которые ожидает модуль переименования.
-     *
-     * Эти константы используются как модулем, так и вызывающим кодом (ядром или UI),
-     * чтобы избежать "магических строк" и опечаток.
-     */
-    namespace rename::keys
-    {
-        inline constexpr std::string_view excelFolder = "excel_folder";     ///< Путь к файлу спецификации Excel.
-        inline constexpr std::string_view scansFolder = "scans_folder"; ///< Путь к папке с отсканированными файлами.
-    } // end namespace rename::keys
-
-
-
 
     /**
      * @brief Модуль переименования отсканированных чертежей.
@@ -34,7 +22,7 @@ namespace pdm::modules
     class Rename final : public shared::IModule
     {
     private:
-        std::string m_id{ "rename" };           ///< Уникальный ID модуля.
+        shared::ModuleId m_id{ shared::ModuleId::Rename };
         std::string m_name{ "Rename scans" };   ///< Имя модуля для отображения.
         std::string m_version{ "0.0.1" };       ///< Текущая версия модуля.
 
@@ -48,6 +36,19 @@ namespace pdm::modules
          * от сторонних библиотек (Qt, QXlsx).
          */
         std::unique_ptr<shared::IExcelReader> m_reader;
+
+        /**
+         * @brief Найти единственный файл с заданным расширением в папке.
+         *
+         * Проверяет, что папка существует. Ищет файлы с указанным расширением.
+         * Если файлов ноль или больше одного — выбрасывает исключение (защита от неоднозначности).
+         *
+         * @param folder Путь к папке для поиска.
+         * @param extension Искомое расширение (например, ".xlsx").
+         * @return Полный путь к найденному файлу.
+         * @throws std::runtime_error Если папки нет, или файлов не найдено, или их больше одного.
+         */
+        static std::string getFileFromFolder(const std::filesystem::path& folder, const std::string& extension);
 
     public:
         /**
@@ -64,7 +65,7 @@ namespace pdm::modules
 
         ~Rename() override = default;
 
-        std::string_view getId() const override { return m_id; }
+        shared::ModuleId getId() const override { return m_id; }
         std::string_view getName() const override { return m_name; }
         std::string_view getVersion() const override { return m_version; }
 
