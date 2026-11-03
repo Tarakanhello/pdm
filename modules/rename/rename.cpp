@@ -1,6 +1,8 @@
 #include "rename.h"
 #include "rename_keys.h"
 
+#include <algorithm>
+#include <format>
 #include <iostream>
 
 namespace pdm::modules
@@ -56,6 +58,37 @@ namespace pdm::modules
         }
 
         std::cout << "Scan files path: " << params.get(rename::keys::scansFolder) << '\n';
+
+
+        try
+        {
+            auto scanFiles{ getFilesFromFolder(params.get(rename::keys::scansFolder), ".jpg", ".JPG", ".jpeg", ".JPEG") };
+
+            if(scanFiles.size() != documents.size())
+            {
+                throw std::runtime_error("pdm::modules::Rename::execute:: quantity of scaned files and documents from excel is not the same");
+            }
+
+            std::ranges::sort(scanFiles);
+
+            std::cout << "Files after rename:\n";
+
+            std::cout << "\n=== Rename Plan ===\n";
+            for(size_t i{ 0 }; const auto& doc : documents)
+            {
+                std::string newName{ doc.number + " " + doc.name + scanFiles[i].extension().string() };
+
+                std::cout << std::format("  - {} -> {}\n", scanFiles[i++].filename().string(), newName);
+            }
+        }
+        catch(const std::exception& e)
+        {
+            std::cerr << e.what() << '\n';
+            return;
+        }
+
+
+        std::cout << "[RenameModule] Module end work!\n";
     }
 
 } // end namespcae pdm
