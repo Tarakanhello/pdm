@@ -1,10 +1,13 @@
 #ifndef RENAME_H
 #define RENAME_H
 
+#include <concepts>
 #include <filesystem>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "imodule.h"
 #include "iexcel_reader.h"
@@ -38,17 +41,56 @@ namespace pdm::modules
         std::unique_ptr<shared::IExcelReader> m_reader;
 
         /**
-         * @brief Найти единственный файл с заданным расширением в папке.
+         * @brief Найти файлы с заданными расширениями в папке.
          *
-         * Проверяет, что папка существует. Ищет файлы с указанным расширением.
-         * Если файлов ноль или больше одного — выбрасывает исключение (защита от неоднозначности).
+         * Использует вариативные шаблоны и свёртки (fold expressions) для
+         * эффективного поиска файлов сразу по нескольким расширениям.
          *
+         * @tparam ARGs Типы аргументов (должны конвертироваться в std::string_view).
          * @param folder Путь к папке для поиска.
-         * @param extension Искомое расширение (например, ".xlsx").
-         * @return Полный путь к найденному файлу.
-         * @throws std::runtime_error Если папки нет, или файлов не найдено, или их больше одного.
+         * @param args Одно или несколько расширений (например, ".xlsx" или ".jpg", ".jpeg").
+         * @return Вектор путей к найденным файлам.
+         * @throws std::runtime_error Если папки не существует или не найдено ни одного файла.
          */
-        static std::string getFileFromFolder(const std::filesystem::path& folder, const std::string& extension);
+        template<std::convertible_to<std::string_view>... ARGs>
+        static std::vector<std::filesystem::path> getFilesFromFolder(const std::filesystem::path& folder, const ARGs&... args)
+        {
+            if(folder.empty())
+            {
+                throw std::runtime_error("[pdm::modules::Rename::getFilesFromFolder] Error: folder path is empty");
+            }
+            if(sizeof...(args) == 0)
+            {
+                throw std::runtime_error("[pdm::modules::Rename::getFilesFromFolder] Error: extensions list is empty");
+            }
+            if(!std::filesystem::exists(folder))
+            {
+                throw std::runtime_error("[pdm::modules::Rename::getFilesFromFolder] Error: folder does not exist: "
+                                         + folder.string());
+            }
+
+            std::vector<std::filesystem::path> foundFiles;
+
+            for(const auto& entry : std::filesystem::directory_iterator{ folder })
+            {
+                if(entry.is_regular_file() && ( (args == entry.path().extension()) || ... ) )
+                {
+                    foundFiles.push_back(entry.path());
+                }
+            }
+
+            if(foundFiles.empty())
+            {
+                std::string extList;
+                ((extList += std::string(args) + " "), ...);
+                throw std::runtime_error("[pdm::modules::Rename::getFilesFromFolder] Error: no files with extensions ["
+                                         + extList
+                                         + "] in folder: "
+                                         + folder.string());
+            }
+
+            return foundFiles;
+        }
 
     public:
         /**
