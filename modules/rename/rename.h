@@ -92,6 +92,9 @@ namespace pdm::modules
             return foundFiles;
         }
 
+        std::vector<shared::Document> getDocumentsFromExcel(std::filesystem::path folder);
+        std::vector<std::filesystem::path> getScansPathsFromFolder(std::filesystem::path folder);
+
     public:
         /**
          * @brief Конструктор с внедрением зависимости (Dependency Injection).

@@ -1,5 +1,6 @@
 #include "rename.h"
 #include "rename_keys.h"
+#include "rename_logger.h"
 
 #include <algorithm>
 #include <format>
@@ -18,58 +19,28 @@ namespace pdm::modules
             return;
         }
 
+        const auto& excelFolder{ params.get(rename::keys::excelFolder) };
+        const auto& scansFolder{ params.get(rename::keys::scansFolder) };
 
         try
         {
-            // Ищем файл .xlsx в папке
-            auto excelFile{ getFilesFromFolder(params.get(rename::keys::excelFolder), ".xlsx") };
+            auto documents{ getDocumentsFromExcel(excelFolder) };
 
-            if(excelFile.size() > 1)
+            std::cout << "Readed documents:\n";
+
+            for(const auto& doc : documents)
             {
-                std::string files;
-                for(const auto& f : excelFile)
-                {
-                    files += "  - " + f.filename().string() + '\n';
-                }
-                throw std::runtime_error("[pdm::modulesRename::execute()] Error: found few files. Left only one:\n" + files);
+                std::cout << "  - " << doc.number << " - " << doc.name << '\n';
             }
 
-            bool opened{ m_reader->open(excelFile[0].string()) };
-            if(!opened)
-            {
-                throw std::runtime_error("[RenameModule] Error: can not download file " + excelFile[0].filename().string() + '\n');
-            }
-
-            std::cout << "[RenameModule] File succesfully loaded.\n";
-        }
-        catch(const std::exception& e)
-        {
-            std::cerr << e.what() << '\n';
-            return;
-        }
-
-        // Получаем чистые данные, без Qt
-        auto documents{ m_reader->readDocuments() };
-
-        std::cout << "Readed documents:\n";
-        for(const auto& doc : documents)
-        {
-            std::cout << "  - " << doc.number << " - " << doc.name << '\n';
-        }
-
-        std::cout << "Scan files path: " << params.get(rename::keys::scansFolder) << '\n';
-
-
-        try
-        {
-            auto scanFiles{ getFilesFromFolder(params.get(rename::keys::scansFolder), ".jpg", ".JPG", ".jpeg", ".JPEG") };
+            auto scanFiles{ getScansPathsFromFolder(scansFolder) };
 
             if(scanFiles.size() != documents.size())
             {
                 throw std::runtime_error("pdm::modules::Rename::execute:: quantity of scaned files and documents from excel is not the same");
             }
 
-            std::ranges::sort(scanFiles);
+            RenameLogger logger{ scansFolder + "/rename_log.csv" };
 
             std::cout << "Files after rename:\n";
 
@@ -89,6 +60,45 @@ namespace pdm::modules
 
 
         std::cout << "[RenameModule] Module end work!\n";
+    }
+
+
+
+    std::vector<shared::Document> Rename::getDocumentsFromExcel(std::filesystem::path folder)
+    {
+        // Ищем файл .xlsx в папке
+        auto excelFile{ getFilesFromFolder(folder, ".xlsx") };
+
+        if(excelFile.size() > 1)
+        {
+            std::string files;
+            for(const auto& f : excelFile)
+            {
+                files += "  - " + f.filename().string() + '\n';
+            }
+            throw std::runtime_error("[pdm::modulesRename::execute()] Error: found few files. Left only one:\n" + files);
+        }
+
+        bool opened{ m_reader->open(excelFile[0].string()) };
+        if(!opened)
+        {
+            throw std::runtime_error("[RenameModule] Error: can not download file " + excelFile[0].filename().string() + '\n');
+        }
+
+        std::cout << "[RenameModule] File succesfully loaded.\n";
+
+        return m_reader->readDocuments();
+    }
+
+
+
+     std::vector<std::filesystem::path> Rename::getScansPathsFromFolder(std::filesystem::path folder)
+    {
+        auto scanFiles{ getFilesFromFolder(folder, ".jpg", ".JPG", ".jpeg", ".JPEG") };
+
+        std::ranges::sort(scanFiles);
+
+        return scanFiles;
     }
 
 } // end namespcae pdm
