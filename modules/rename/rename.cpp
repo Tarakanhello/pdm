@@ -40,17 +40,57 @@ namespace pdm::modules
                 throw std::runtime_error("pdm::modules::Rename::execute:: quantity of scaned files and documents from excel is not the same");
             }
 
-            RenameLogger logger{ scansFolder + "/rename_log.csv" };
+            auto logPath{ scansFolder + "/rename_log.csv" };
 
-            std::cout << "Files after rename:\n";
+            RenameLogger logger{ logPath };
 
-            std::cout << "\n=== Rename Plan ===\n";
+            std::cout << "\n=== Executing Rename ===\n";
+
+            size_t successCount{ 0 };
+            size_t errorCount{ 0 };
+
+
             for(size_t i{ 0 }; const auto& doc : documents)
             {
+                const auto& oldPath{ scanFiles[i] };
+                std::string oldName{ oldPath.filename().string() };
                 std::string newName{ doc.number + " " + doc.name + scanFiles[i].extension().string() };
 
-                std::cout << std::format("  - {} -> {}\n", scanFiles[i++].filename().string(), newName);
+                auto newPath{ oldPath.parent_path() / newName };
+
+                try
+                {
+                    // Проверяем, не существует ли уже файл с таким именем
+                    if(std::filesystem::exists(newPath))
+                    {
+                        std::string msg{ "Target file already exist" };
+                        std::cerr << "[RenameModule] Warning: " << msg << " -> " << newName << '\n';
+                        logger.log(oldName, newName, "ERROR: " + msg);
+                        ++errorCount;
+                    }
+                    else
+                    {
+                        std::filesystem::rename(oldPath, newPath);
+                        std::cout << "  OK: " << oldName << " -> " << newName << '\n';
+                        logger.log(oldName, newName, "OK");
+                        ++successCount;
+                    }
+                }
+                catch(const std::filesystem::filesystem_error& e)
+                {
+                    std::cerr << "[RenameModule] Filesystem error on " << oldName << ": " << e.what() << '\n';
+                    logger.log(oldName, newName, std::string{ "ERROR: " } + e.what());
+                    ++errorCount;
+                }
+
+                ++i;
             }
+
+
+            std::cout << "\n=== Summary ===\n";
+            std::cout << "Renamed: " << successCount << "\n";
+            std::cout << "Errors:  " << errorCount << "\n";
+            std::cout << "Log saved to: " << logPath << "\n";
         }
         catch(const std::exception& e)
         {

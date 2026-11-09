@@ -1,9 +1,15 @@
 #ifndef RENAME_LOGGER_H
 #define RENAME_LOGGER_H
 
+#include <format>
 #include <fstream>
 #include <string>
 #include <filesystem>
+
+namespace
+{
+    inline constexpr const char* kUtf8Bom{ "\xEF\xBB\xBF" };
+}
 
 namespace pdm::modules
 {
@@ -29,6 +35,12 @@ namespace pdm::modules
             : RenameLogger{ path.string() }
         {}
 
+
+
+        /**
+         * @brief Открыть файл лога.
+         * @param path Путь к файлу (например, "rename_log.csv").
+         */
         void open(const std::filesystem::path& path)
         {
             open(path.string());
@@ -43,7 +55,32 @@ namespace pdm::modules
                 throw std::runtime_error("RanameLogger: Error: cannot create log file: " + path);
             }
 
+            m_file << kUtf8Bom;
+
             m_file << "old;new;status\n";
+        }
+
+
+        /**
+         * @brief Записать операцию в лог.
+         * @param oldName Старое имя.
+         * @param newName Новое имя.
+         * @param status Статус (OK или ERROR).
+         */
+        void log(const std::string& oldName, const std::string& newName, const std::string& status)
+        {
+            if(!m_file.is_open())
+            {
+                throw std::runtime_error("RanameLogger::Log: Error: Lof file is not open");
+            }
+
+            m_file << std::format("{};{};{}\n", oldName, newName, status);
+            m_file.flush(); // Принудительно сбрасываем буфер на диск, чтобы не потерять данные при сбое
+        }
+
+        bool isOpen() const
+        {
+            return m_file.is_open();
         }
 
     };
