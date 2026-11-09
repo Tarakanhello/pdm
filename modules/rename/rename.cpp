@@ -1,6 +1,5 @@
 #include "rename.h"
 #include "rename_keys.h"
-#include "rename_logger.h"
 
 #include <algorithm>
 #include <format>
@@ -25,79 +24,20 @@ namespace pdm::modules
         try
         {
             auto documents{ getDocumentsFromExcel(excelFolder) };
-
-            std::cout << "Readed documents:\n";
-
-            for(const auto& doc : documents)
-            {
-                std::cout << "  - " << doc.number << " - " << doc.name << '\n';
-            }
-
             auto scanFiles{ getScansPathsFromFolder(scansFolder) };
 
-            if(scanFiles.size() != documents.size())
+            if(documents.size() != scanFiles.size())
             {
                 throw std::runtime_error("pdm::modules::Rename::execute:: quantity of scaned files and documents from excel is not the same");
             }
 
-            auto logPath{ scansFolder + "/rename_log.csv" };
-
-            RenameLogger logger{ logPath };
-
-            std::cout << "\n=== Executing Rename ===\n";
-
-            size_t successCount{ 0 };
-            size_t errorCount{ 0 };
-
-
-            for(size_t i{ 0 }; const auto& doc : documents)
-            {
-                const auto& oldPath{ scanFiles[i] };
-                std::string oldName{ oldPath.filename().string() };
-                std::string newName{ doc.number + " " + doc.name + scanFiles[i].extension().string() };
-
-                auto newPath{ oldPath.parent_path() / newName };
-
-                try
-                {
-                    // Проверяем, не существует ли уже файл с таким именем
-                    if(std::filesystem::exists(newPath))
-                    {
-                        std::string msg{ "Target file already exist" };
-                        std::cerr << "[RenameModule] Warning: " << msg << " -> " << newName << '\n';
-                        logger.log(oldName, newName, "ERROR: " + msg);
-                        ++errorCount;
-                    }
-                    else
-                    {
-                        std::filesystem::rename(oldPath, newPath);
-                        std::cout << "  OK: " << oldName << " -> " << newName << '\n';
-                        logger.log(oldName, newName, "OK");
-                        ++successCount;
-                    }
-                }
-                catch(const std::filesystem::filesystem_error& e)
-                {
-                    std::cerr << "[RenameModule] Filesystem error on " << oldName << ": " << e.what() << '\n';
-                    logger.log(oldName, newName, std::string{ "ERROR: " } + e.what());
-                    ++errorCount;
-                }
-
-                ++i;
-            }
-
-
-            std::cout << "\n=== Summary ===\n";
-            std::cout << "Renamed: " << successCount << "\n";
-            std::cout << "Errors:  " << errorCount << "\n";
-            std::cout << "Log saved to: " << logPath << "\n";
+            performRename(documents, scanFiles, scansFolder);
         }
         catch(const std::exception& e)
         {
             std::cerr << e.what() << '\n';
             return;
         }
-
 
         std::cout << "[RenameModule] Module end work!\n";
     }
@@ -125,8 +65,6 @@ namespace pdm::modules
             throw std::runtime_error("[RenameModule] Error: can not download file " + excelFile[0].filename().string() + '\n');
         }
 
-        std::cout << "[RenameModule] File succesfully loaded.\n";
-
         return m_reader->readDocuments();
     }
 
@@ -139,6 +77,75 @@ namespace pdm::modules
         std::ranges::sort(scanFiles);
 
         return scanFiles;
+    }
+
+
+
+    std::string Rename::buildNewName(const shared::Document& doc, const std::filesystem::path& oldPath)
+    {
+        return doc.number + " " + doc.name + oldPath.extension().string();
+    }
+
+
+    void Rename::performRename(const std::vector<shared::Document>& documents,
+                               const std::vector<std::filesystem::path>& scanFiles,
+                               const std::filesystem::path& scansFolder)
+    {
+        auto logPath{ scansFolder / "rename_log.csv" };
+
+        RenameLogger logger{ logPath };
+
+        size_t successCount{ 0 };
+        size_t errorCount{ 0 };
+
+        for(size_t i{ 0 }; const auto& doc : documents)
+        {
+            const auto& oldPath{ scanFiles[i] };
+            auto newPath{ oldPath.parent_path() / buildNewName(doc, oldPath) };
+
+            if(renameOneFile(oldPath, newPath, logger))
+            {
+                ++successCount;
+            }
+            else
+            {
+                ++errorCount;
+            }
+
+            ++i;
+        }
+
+        std::cout << "\n=== Summary ===\n";
+        std::cout << "Renamed: " << successCount << "\n";
+        std::cout << "Errors:  " << errorCount << "\n";
+        std::cout << "Log saved to: " << logPath << "\n";
+    }
+
+    bool Rename::renameOneFile(const std::filesystem::path& oldPath, const std::filesystem::path& newPath, RenameLogger& logger)
+    {
+        bool success{ false };
+
+        try
+        {
+            // Проверяем, не существует ли уже файл с таким именем
+            if(std::filesystem::exists(newPath))
+            {
+                std::string msg{ "Target file already exist" };
+                logger.log(oldPath.filename().string(), newPath.filename().string(), "ERROR: " + msg);
+            }
+            else
+            {
+                std::filesystem::rename(oldPath, newPath);
+                logger.log(oldPath.filename().string(), newPath.filename().string(), "OK");
+                success = true;
+            }
+        }
+        catch(const std::filesystem::filesystem_error& e)
+        {
+            logger.log(oldPath.filename().string(), newPath.filename().string(), std::string{ "ERROR: " } + e.what());
+        }
+
+        return success;
     }
 
 } // end namespcae pdm

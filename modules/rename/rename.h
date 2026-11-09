@@ -12,6 +12,7 @@
 #include "imodule.h"
 #include "iexcel_reader.h"
 #include "module_id.h"
+#include "rename_logger.h"
 
 namespace pdm::modules
 {
@@ -92,8 +93,69 @@ namespace pdm::modules
             return foundFiles;
         }
 
+
+
+        /**
+         * @brief Найти Excel-файл в папке и извлечь из него список документов.
+         *
+         * @param folder Путь к папке, содержащей файл спецификации.
+         * @return Вектор прочитанных документов.
+         * @throws std::runtime_error Если файл не найден, их несколько или не удалось открыть.
+         */
         std::vector<shared::Document> getDocumentsFromExcel(std::filesystem::path folder);
+
+
+
+        /**
+         * @brief Найти все отсканированные изображения в папке и отсортировать их.
+         *
+         * @param folder Путь к папке со сканами.
+         * @return Отсортированный вектор путей к найденным изображениям.
+         * @throws std::runtime_error Если в папке нет изображений.
+         */
         std::vector<std::filesystem::path> getScansPathsFromFolder(std::filesystem::path folder);
+
+
+
+        /**
+         * @brief Сформировать новое имя файла на основе документа и старого пути.
+         *
+         * @param doc Документ из спецификации (содержит номер и наименование).
+         * @param oldPath Старый путь к файлу (используется для извлечения расширения).
+         * @return Новое имя файла (без пути).
+         */
+        std::string buildNewName(const shared::Document& doc, const std::filesystem::path& oldPath);
+
+
+
+        /**
+         * @brief Выполнить процесс переименования для всех сопоставленных файлов.
+         *
+         * @details Создает лог-файл и поочередно вызывает renameOneFile для каждой пары.
+         *
+         * @param documents Список документов из спецификации.
+         * @param scanFiles Список путей к сканам (отсортированный).
+         * @param scansFolder Папка со сканами (для сохранения лога).
+         */
+        void performRename(const std::vector<shared::Document>& documents,
+                           const std::vector<std::filesystem::path>& scanFiles,
+                           const std::filesystem::path& scansFolder);
+
+
+
+        /**
+         * @brief Безопасно переименовать один файл.
+         *
+         * @details Проверяет, не существует ли уже файл с целевым именем.
+         * Выполняет переименование через std::filesystem. Логирует результат.
+         *
+         * @param oldPath Старый путь к файлу.
+         * @param newPath Новый путь к файлу.
+         * @param logger Ссылка на логгер для записи результата.
+         * @return true, если переименование прошло успешно, иначе false.
+         */
+        bool renameOneFile(const std::filesystem::path& oldPath, const std::filesystem::path& newPath, RenameLogger& logger);
+
 
     public:
         /**
