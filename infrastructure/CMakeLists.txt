@@ -1,5 +1,6 @@
 add_library(infrastructure STATIC
     qxlsx_reader.h
+    mock_stamp_recognizer.h
 
 )
 

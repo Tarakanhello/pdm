@@ -18,7 +18,7 @@ TEST_CASE("Document: creation and field initialization", "[document]")
 
     SECTION("Fields are initialized correctly")
     {
-        pdm::shared::Document doc{"716.36.15", "Полка", pdm::shared::DocumentTypeCode::AssemblyDrawing };
+        pdm::shared::Document doc{"716.36.15", pdm::shared::DocumentTypeCode::AssemblyDrawing, "Полка" };
 
         REQUIRE(doc.number == "716.36.15");
         REQUIRE(doc.name == "Полка");
@@ -32,7 +32,7 @@ TEST_CASE("Document: creation and field initialization", "[document]")
 TEST_CASE("Document: copy", "[document][copy]")
 {
     // Создаём исходный объект с известными значениями
-    pdm::shared::Document original{"716.36.15", "Полка", pdm::shared::DocumentTypeCode::AssemblyDrawing};
+    pdm::shared::Document original{"716.36.15", pdm::shared::DocumentTypeCode::AssemblyDrawing, "Полка" };
 
     SECTION("Copy constructor")
     {

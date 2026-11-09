@@ -4,13 +4,14 @@
 #include <concepts>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "imodule.h"
-#include "iexcel_reader.h"
+#include "istamp_recognizer.h"
 #include "module_id.h"
 #include "rename_logger.h"
 
@@ -26,20 +27,29 @@ namespace pdm::modules
     class Rename final : public shared::IModule
     {
     private:
+        /**
+         * @brief Внутреннее состояние процесса переименования.
+         *
+         * Хранит контекст, необходимый для отслеживания последовательности
+         * листов одного документа и сбора статистики.
+         */
+        struct RenameState
+        {
+            std::optional<shared::Document> previousDoc{ std::nullopt };    ///< Документ, распознанный на предыдущем шаге (для склейки листов).
+            int currentPage{ 1 };       ///< Текущий номер листа многолистового документа.
+            size_t successCount{ 0 };   ///< Количество успешно переименованных файлов.
+            size_t errorCount{ 0 };     ///< Количество ошибок при переименовании.
+        };
+
         shared::ModuleId m_id{ shared::ModuleId::Rename };
         std::string m_name{ "Rename scans" };   ///< Имя модуля для отображения.
         std::string m_version{ "0.0.1" };       ///< Текущая версия модуля.
 
-        /**
-         * @brief Интерфейс для чтения данных из Excel.
-         *
-         * Модуль хранит указатель на интерфейс (IExcelReader), а не на
-         * конкретную реализацию (например, QxlsxReader).
-         * Это обеспечивает слабую связанность: модуль не знает, откуда
-         * именно приходят данные (Excel, CSV, база данных), и не зависит
-         * от сторонних библиотек (Qt, QXlsx).
-         */
-        std::unique_ptr<shared::IExcelReader> m_reader;
+        std::unique_ptr<shared::IStampRecognizer> m_recognizer; ///< Интерфейс для распознавания штампа.
+
+        // ===================================================================
+        // ГРУППА 1: Утилиты поиска файлов
+        // ===================================================================
 
         /**
          * @brief Найти файлы с заданными расширениями в папке.
@@ -93,19 +103,6 @@ namespace pdm::modules
             return foundFiles;
         }
 
-
-
-        /**
-         * @brief Найти Excel-файл в папке и извлечь из него список документов.
-         *
-         * @param folder Путь к папке, содержащей файл спецификации.
-         * @return Вектор прочитанных документов.
-         * @throws std::runtime_error Если файл не найден, их несколько или не удалось открыть.
-         */
-        std::vector<shared::Document> getDocumentsFromExcel(std::filesystem::path folder);
-
-
-
         /**
          * @brief Найти все отсканированные изображения в папке и отсортировать их.
          *
@@ -115,33 +112,49 @@ namespace pdm::modules
          */
         std::vector<std::filesystem::path> getScansPathsFromFolder(std::filesystem::path folder);
 
+        // ===================================================================
+        // ГРУППА 2: Основная логика переименования
+        // ===================================================================
 
+        /**
+         * @brief Запустить процесс переименования для всех найденных файлов.
+         *
+         * @details Создает лог-файл, инициализирует состояние (RenameState) и
+         * поочередно передает файлы в processSingleFile.
+         *
+         * @param scanFiles Список путей к сканам (отсортированный).
+         * @param scansFolder Папка со сканами (используется для сохранения лога).
+         */
+        void performRename(const std::vector<std::filesystem::path>& scanFiles,
+                           const std::filesystem::path& scansFolder);
+
+        /**
+         * @brief Обработать один файл: распознать, сформировать имя и переименовать.
+         *
+         * @details Если штамп не распознан, пишет ошибку в лог и сбрасывает состояние.
+         * Если распознан, проверяет, является ли файл продолжением предыдущего документа.
+         *
+         * @param file Путь к текущему файлу.
+         * @param state Ссылка на объект состояния (обновляется в процессе работы).
+         * @param logger Ссылка на логгер.
+         */
+        void processSingleFile(const std::filesystem::path& file,
+                               RenameState& state,
+                               RenameLogger& logger);
 
         /**
          * @brief Сформировать новое имя файла на основе документа и старого пути.
          *
-         * @param doc Документ из спецификации (содержит номер и наименование).
+         * @param doc Документ (содержит номер, код, наименование и количество листов).
          * @param oldPath Старый путь к файлу (используется для извлечения расширения).
+         * @param page Номер текущего листа (если листов больше 1).
          * @return Новое имя файла (без пути).
          */
-        std::string buildNewName(const shared::Document& doc, const std::filesystem::path& oldPath);
+        std::string buildNewName(const shared::Document& doc, const std::filesystem::path& oldPath, int page = 0);
 
-
-
-        /**
-         * @brief Выполнить процесс переименования для всех сопоставленных файлов.
-         *
-         * @details Создает лог-файл и поочередно вызывает renameOneFile для каждой пары.
-         *
-         * @param documents Список документов из спецификации.
-         * @param scanFiles Список путей к сканам (отсортированный).
-         * @param scansFolder Папка со сканами (для сохранения лога).
-         */
-        void performRename(const std::vector<shared::Document>& documents,
-                           const std::vector<std::filesystem::path>& scanFiles,
-                           const std::filesystem::path& scansFolder);
-
-
+        // ===================================================================
+        // ГРУППА 3: Файловые операции
+        // ===================================================================
 
         /**
          * @brief Безопасно переименовать один файл.
@@ -158,30 +171,48 @@ namespace pdm::modules
 
 
     public:
+        // ===================================================================
+        // Публичный интерфейс (Реализация контракта IModule)
+        // ===================================================================
+
         /**
          * @brief Конструктор с внедрением зависимости (Dependency Injection).
          *
-         * Конкретная реализация ридера передается снаружи (из main.cpp).
-         * Это позволяет легко подменять реализации (например, в тестах
-         * использовать MockExcelReader) без перекомпиляции самого модуля.
-         *
-         * @param reader Умный указатель на реализацию интерфейса IExcelReader.
+         * @param recognizer Умный указатель на распознаватель штампов (IStampRecognizer).
          */
-        explicit Rename(std::unique_ptr<shared::IExcelReader> reader)
-            : m_reader{ std::move(reader) } {}
+        Rename(std::unique_ptr<shared::IStampRecognizer> recognizer)
+            : m_recognizer{ std::move(recognizer) }
+        {}
 
         ~Rename() override = default;
 
+        /**
+         * @brief Получить ID модуля.
+         * @return ModuleId::Rename.
+         */
         shared::ModuleId getId() const override { return m_id; }
+
+        /**
+         * @brief Получить имя модуля.
+         * @return Строка с именем.
+         */
         std::string_view getName() const override { return m_name; }
+
+        /**
+         * @brief Получить версию модуля.
+         * @return Строка с версией.
+         */
         std::string_view getVersion() const override { return m_version; }
 
         /**
-         * @brief Запустить процесс переименования.
-         * @param params Параметры задачи (должны содержать ключи excelFolder и scansFolder).
+         * @brief Запустить процесс переименования (главный метод модуля).
+         * @param params Параметры задачи (должны содержать ключ scansFolder).
          */
         void execute(const shared::JobParams& params) override;
     };
+
+
+
 
 } // end namespace
 

@@ -7,6 +7,7 @@ target_sources(shared INTERFACE
         document.h
         iexcel_reader.h
         imodule.h
+        istamp_recognizer.h
         module_id.h
         job_params.h
 )

@@ -1,7 +1,9 @@
 #ifndef DOCUMENT_H
 #define DOCUMENT_H
 
+#include <array>
 #include <string>
+#include <utility>
 
 /**
  * @brief Пространство имен для общих типов и интерфейсов системы PDM.
@@ -18,7 +20,7 @@ namespace pdm::shared
     {
         DetailDrawing,                      ///< ЧД  Чертеж детали // основной документ код может отсутствовать
         CADAssemblyModel,                   ///< ЭСБ Электронная модель сборочной единицы
-        AssemblyDrawing,                   ///< СБ  Сборочный чертеж
+        AssemblyDrawing,                    ///< СБ  Сборочный чертеж
         GeneralArrangementDrawing,          ///< ВО  Чертеж общего вида
         TheoreticalDrawing,                 ///< ТЧ  Теоретический чертеж
         DimensionalDrawing,                 ///< ГЧ  Габаритный чертеж
@@ -167,9 +169,168 @@ namespace pdm::shared
     struct Document
     {
         std::string number;                                 ///< Обозначение (номер) документа, например "13084-1-00000-00".
-        std::string name;                                   ///< Наименование документа, например "Домкрат для ЖДВ".
         DocumentTypeCode code{ DocumentTypeCode::Unknown }; ///< Тип документа по ГОСТ (по умолчанию Unknown).
+        std::string name;                                   ///< Наименование документа, например "Домкрат для ЖДВ".
+        int totalSheets{ 1 };                               ///< Всего листов
     };
+
+
+
+    constexpr std::array<std::pair<DocumentTypeCode, std::string_view>, static_cast<size_t>(DocumentTypeCode::Unknown) + 1> k_documentTypeCodeMap
+    {{
+        { DocumentTypeCode::DetailDrawing,                  "ЧД"  },
+        { DocumentTypeCode::CADAssemblyModel,               "ЭСБ" },
+        { DocumentTypeCode::AssemblyDrawing,                "СБ"  },
+        { DocumentTypeCode::GeneralArrangementDrawing,      "ВО"  },
+        { DocumentTypeCode::TheoreticalDrawing,             "ТЧ"  },
+        { DocumentTypeCode::DimensionalDrawing,             "ГЧ"  },
+        { DocumentTypeCode::WiringDiagram,                  "МЭ"  },
+        { DocumentTypeCode::InstallationDrawing,            "МЧ"  },
+        { DocumentTypeCode::PackingDrawing,                 "УЧ"  },
+
+        { DocumentTypeCode::Specification,                  "СП"  },
+        { DocumentTypeCode::ListOfSpecifications,           "ВС"  },
+        { DocumentTypeCode::ListOfReferenceDocuments,       "ВД"  },
+        { DocumentTypeCode::PurchasedPartsList,             "ВП"  },
+        { DocumentTypeCode::ApprovedPurchasedPartsList,     "ВИ"  },
+        { DocumentTypeCode::ListOfOriginalsHolders,         "ДП"  },
+        { DocumentTypeCode::ScheduleOfTechnicalProposal,    "ПТ"  },
+        { DocumentTypeCode::ScheduleOfPreliminaryDesign,    "ЭП"  },
+        { DocumentTypeCode::ScheduleOfDetailedDesign,       "ТП"  },
+        { DocumentTypeCode::ExplanatoryNote,                "ПЗ"  },
+        { DocumentTypeCode::ScheduleOfElectronicDocuments,  "ВДЭ" },
+        { DocumentTypeCode::TechnicalSpecifications,        "ТУ"  },
+        { DocumentTypeCode::TestProgramAndProcedure,        "ПМ"  },
+        { DocumentTypeCode::Tables,                         "ТБ"  },
+        { DocumentTypeCode::Calculations,                   "РР"  },
+        { DocumentTypeCode::Instruction,                    "И"   },
+        { DocumentTypeCode::OtherDocuments,                 "Д"   },
+
+        { DocumentTypeCode::ElectricalBlockDiagram,         "Э1"  },
+        { DocumentTypeCode::ElectricalFunctionalDiagram,    "Э2"  },
+        { DocumentTypeCode::ElectricalSchematicDiagram,     "Э3"  },
+        { DocumentTypeCode::ElectricalWiringDiagram,        "Э4"  },
+        { DocumentTypeCode::ElectricalConnectionDiagram,    "Э5"  },
+        { DocumentTypeCode::ElectricalGeneralDiagram,       "Э6"  },
+        { DocumentTypeCode::ElectricalLayoutDiagram,        "Э7"  },
+        { DocumentTypeCode::ElectricalCombinedDiagram,      "Э0"  },
+
+        { DocumentTypeCode::HydraulicBlockDiagram,          "Г1"  },
+        { DocumentTypeCode::HydraulicFunctionalDiagram,     "Г2"  },
+        { DocumentTypeCode::HydraulicSchematicDiagram,      "Г3"  },
+        { DocumentTypeCode::HydraulicPipingDiagram,         "Г4"  },
+        { DocumentTypeCode::HydraulicConnectionDiagram,     "Г5"  },
+        { DocumentTypeCode::HydraulicGeneralDiagram,        "Г6"  },
+        { DocumentTypeCode::HydraulicLayoutDiagram,         "Г7"  },
+        { DocumentTypeCode::HydraulicCombinedDiagram,       "Г0"  },
+
+        { DocumentTypeCode::PneumaticBlockDiagram,          "П1"  },
+        { DocumentTypeCode::PneumaticFunctionalDiagram,     "П2"  },
+        { DocumentTypeCode::PneumaticSchematicDiagram,      "П3"  },
+        { DocumentTypeCode::PneumaticPipingDiagram,         "П4"  },
+        { DocumentTypeCode::PneumaticConnectionDiagram,     "П5"  },
+        { DocumentTypeCode::PneumaticGeneralDiagram,        "П6"  },
+        { DocumentTypeCode::PneumaticLayoutDiagram,         "П7"  },
+        { DocumentTypeCode::PneumaticCombinedDiagram,       "П0"  },
+
+        { DocumentTypeCode::GasBlockDiagram,                "Х1"  },
+        { DocumentTypeCode::GasFunctionalDiagram,           "Х2"  },
+        { DocumentTypeCode::GasSchematicDiagram,            "Х3"  },
+        { DocumentTypeCode::GasPipingDiagram,               "Х4"  },
+        { DocumentTypeCode::GasConnectionDiagram,           "Х5"  },
+        { DocumentTypeCode::GasGeneralDiagram,              "Х6"  },
+        { DocumentTypeCode::GasLayoutDiagram,               "Х7"  },
+        { DocumentTypeCode::GasCombinedDiagram,             "Х0"  },
+
+        { DocumentTypeCode::KinematicBlockDiagram,          "К1"  },
+        { DocumentTypeCode::KinematicFunctionalDiagram,     "К2"  },
+        { DocumentTypeCode::KinematicSchematicDiagram,      "К3"  },
+        { DocumentTypeCode::KinematicLinkageDiagram,        "К4"  },
+        { DocumentTypeCode::KinematicConnectionDiagram,     "К5"  },
+        { DocumentTypeCode::KinematicGeneralDiagram,        "К6"  },
+        { DocumentTypeCode::KinematicLayoutDiagram,         "К7"  },
+        { DocumentTypeCode::KinematicCombinedDiagram,       "К0"  },
+
+        { DocumentTypeCode::VacuumBlockDiagram,             "В1"  },
+        { DocumentTypeCode::VacuumFunctionalDiagram,        "В2"  },
+        { DocumentTypeCode::VacuumSchematicDiagram,         "В3"  },
+        { DocumentTypeCode::VacuumPipingDiagram,            "В4"  },
+        { DocumentTypeCode::VacuumConnectionDiagram,        "В5"  },
+        { DocumentTypeCode::VacuumGeneralDiagram,           "В6"  },
+        { DocumentTypeCode::VacuumLayoutDiagram,            "В7"  },
+        { DocumentTypeCode::VacuumCombinedDiagram,          "В0"  },
+
+        { DocumentTypeCode::OpticalBlockDiagram,            "Л1"  },
+        { DocumentTypeCode::OpticalFunctionalDiagram,       "Л2"  },
+        { DocumentTypeCode::OpticalSchematicDiagram,        "Л3"  },
+        { DocumentTypeCode::OpticalInterconnectionDiagram,  "Л4"  },
+        { DocumentTypeCode::OpticalConnectionDiagram,       "Л5"  },
+        { DocumentTypeCode::OpticalGeneralDiagram,          "Л6"  },
+        { DocumentTypeCode::OpticalLayoutDiagram,           "Л7"  },
+        { DocumentTypeCode::OpticalCombinedDiagram,         "Л0"  },
+
+        { DocumentTypeCode::PowerBlockDiagram,              "Р1"  },
+        { DocumentTypeCode::PowerFunctionalDiagram,         "Р2"  },
+        { DocumentTypeCode::PowerSchematicDiagram,          "Р3"  },
+        { DocumentTypeCode::PowerInterconnectionDiagram,    "Р4"  },
+        { DocumentTypeCode::PowerConnectionDiagram,         "Р5"  },
+        { DocumentTypeCode::PowerGeneralDiagram,            "Р6"  },
+        { DocumentTypeCode::PowerLayoutDiagram,             "Р7"  },
+        { DocumentTypeCode::PowerCombinedDiagram,           "Р0"  },
+
+        { DocumentTypeCode::StructureBlockDiagram,          "Е1"  },
+        { DocumentTypeCode::StructureFunctionalDiagram,     "Е2"  },
+        { DocumentTypeCode::StructureSchematicDiagram,      "Е3"  },
+        { DocumentTypeCode::StructureInterconnectionDiagram,"Е4"  },
+        { DocumentTypeCode::StructureConnectionDiagram,     "Е5"  },
+        { DocumentTypeCode::StructureGeneralDiagram,        "Е6"  },
+        { DocumentTypeCode::StructureLayoutDiagram,         "Е7"  },
+        { DocumentTypeCode::StructureCombinedDiagram,       "Е0"  },
+
+        { DocumentTypeCode::CombinedBlockDiagram,           "С1"  },
+        { DocumentTypeCode::CombinedFunctionalDiagram,      "С2"  },
+        { DocumentTypeCode::CombinedSchematicDiagram,       "С3"  },
+        { DocumentTypeCode::CombinedInterconnectionDiagram, "С4"  },
+        { DocumentTypeCode::CombinedConnectionDiagram,      "С5"  },
+        { DocumentTypeCode::CombinedGeneralDiagram,         "С6"  },
+        { DocumentTypeCode::CombinedLayoutDiagram,          "С7"  },
+        { DocumentTypeCode::CombinedCombinedDiagram,        "С0"  },
+
+        { DocumentTypeCode::UserManual,                     "РЭ"  },
+        { DocumentTypeCode::Instructions,                   "ИМ"  },
+        { DocumentTypeCode::Logbook,                        "ФО"  },
+        { DocumentTypeCode::DataSheet,                      "ПС"  },
+        { DocumentTypeCode::Label,                          "ЭТ"  },
+        { DocumentTypeCode::ProductCatalog,                 "КИ"  },
+        { DocumentTypeCode::SparePartsNorms,                "НЗЧ" },
+        { DocumentTypeCode::MaterialsNorms,                 "НМ"  },
+        { DocumentTypeCode::SpareParts,                     "ЗИ"  },
+        { DocumentTypeCode::EducationalAndTechnicalPosters, "УП"  },
+        { DocumentTypeCode::SpecialOperationalInstructions, "ИС"  },
+        { DocumentTypeCode::ListOfOperationalDocuments,     "ВЭ"  },
+
+        { DocumentTypeCode::Unknown,                        ""    },
+    }};
+
+
+    inline std::string_view DocumentTypeCodeToString(DocumentTypeCode code, bool isFullCode = false)
+    {
+        if(!isFullCode && (code == DocumentTypeCode::DetailDrawing || code == DocumentTypeCode::Specification))
+        {
+            return {};
+        }
+
+        for(const auto& entry : k_documentTypeCodeMap)
+        {
+            if(entry.first == code)
+            {
+                return entry.second;
+            }
+        }
+
+        return {};
+    }
+
 } // end namespace pdm
 
 
