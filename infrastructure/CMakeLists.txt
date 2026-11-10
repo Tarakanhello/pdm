@@ -10,8 +10,7 @@ set_target_properties(infrastructure PROPERTIES LINKER_LANGUAGE CXX)
 
 target_link_libraries(infrastructure PUBLIC
     shared
-    Qt6::Core
-    Qt6::Gui
     httplib
+    stb
     nlohmann_json::nlohmann_json
 )

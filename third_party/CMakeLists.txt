@@ -22,3 +22,7 @@ endif()
 # У json есть свой CMakeLists.txt, поэтому просто добавляем как подкаталог
 set(JSON_BuildTests OFF CACHE INTERNAL "") # Отключаем тесты, чтобы не тратить время
 add_subdirectory(nlohmann-json)
+
+
+add_library(stb INTERFACE)
+target_include_directories(stb INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/stb)
