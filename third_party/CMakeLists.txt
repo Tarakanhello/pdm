@@ -7,3 +7,18 @@ endif()
 
 add_subdirectory(Catch2)
 add_subdirectory(QXlsx/QXlsx)
+
+add_library(httplib INTERFACE)
+target_include_directories(httplib INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/cpp-httplib)
+
+# Для работы с сетью на Windows/MinGW требуются системные библиотеки
+if(MINGW)
+    target_link_libraries(httplib INTERFACE ws2_32 crypt32 cryptui)
+elseif(MSVC)
+    target_link_libraries(httplib INTERFACE ws2_32 crypt32)
+endif()
+
+# --- nlohmann/json (header-only) ---
+# У json есть свой CMakeLists.txt, поэтому просто добавляем как подкаталог
+set(JSON_BuildTests OFF CACHE INTERNAL "") # Отключаем тесты, чтобы не тратить время
+add_subdirectory(nlohmann-json)

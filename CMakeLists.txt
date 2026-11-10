@@ -13,6 +13,8 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
 
+find_package(Qt6 REQUIRED COMPONENTS Core Gui)
+
 add_subdirectory(apps)
 add_subdirectory(composition)
 add_subdirectory(core)
