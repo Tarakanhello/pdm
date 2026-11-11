@@ -2,7 +2,7 @@
 
 #include <stdexcept>
 
-#include "vlm_stamp_recognizer.h"
+#include "mock_stamp_recognizer.h"
 #include "rename.h"
 
 namespace pdm::composition
@@ -13,7 +13,7 @@ namespace pdm::composition
         {
         case shared::ModuleId::Rename:
             // Внедряем зависимость (QxlsxReader) в модуль Rename
-            return std::make_unique<modules::Rename>(std::make_unique<infrastructure::VLMStampRecognizer>("http://127.0.0.1:8080"));
+            return std::make_unique<modules::Rename>(std::make_unique<infrastructure::MockStampRecognizer>());
 
         case shared::ModuleId::NumberOfElements:
             throw std::logic_error("pdm::apps::CreateModule: Invalid ModuleId (NumberOfElements)");

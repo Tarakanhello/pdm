@@ -19,17 +19,17 @@ namespace pdm::infrastructure
 
             if(filename == "data1.jpg")
             {
-                return shared::Document{ "сб065", shared::DocumentTypeCode::Specification, "Опора с механизмом поворота крана", 2 };
+                return shared::Document{ "сб065", shared::DocumentTypeCode::Specification, "Опора с механизмом поворота крана", 2 , 1};
             }
 
             if(filename == "data2.jpg")
             {
-                return shared::Document{ "сб065", shared::DocumentTypeCode::Specification, "Опора с механизмом поворота крана", 2 };
+                return shared::Document{ "сб065", shared::DocumentTypeCode::Specification, "Опора с механизмом поворота крана", 2, 2 };
             }
 
             if(filename == "data3.jpg")
             {
-                return shared::Document{ "сб065", shared::DocumentTypeCode::AssemblyDrawing, "Опора с механизмом поворота крана", 1 };
+                return shared::Document{ "сб065", shared::DocumentTypeCode::AssemblyDrawing, "Опора с механизмом поворота крана", 1, 1 };
             }
 
             return std::nullopt; // Не удалось распознать
