@@ -1,6 +1,8 @@
 add_library(infrastructure STATIC
     qxlsx_reader.h
     mock_stamp_recognizer.h
+    vlm_stamp_recognizer.h
+    vlm_stamp_recognizer.cpp
 
 )
 
@@ -12,5 +14,6 @@ target_link_libraries(infrastructure PUBLIC
     shared
     httplib
     stb
+    stb_image_resize
     nlohmann_json::nlohmann_json
 )

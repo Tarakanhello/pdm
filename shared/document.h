@@ -172,6 +172,7 @@ namespace pdm::shared
         DocumentTypeCode code{ DocumentTypeCode::Unknown }; ///< Тип документа по ГОСТ (по умолчанию Unknown).
         std::string name;                                   ///< Наименование документа, например "Домкрат для ЖДВ".
         int totalSheets{ 1 };                               ///< Всего листов
+        int sheet{ 1 }; ///< Номер текущего листа (например, Лист 1, Лист 2)
     };
 
 

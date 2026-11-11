@@ -25,4 +25,7 @@ add_subdirectory(nlohmann-json)
 
 
 add_library(stb INTERFACE)
-target_include_directories(stb INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/stb)
+target_include_directories(stb SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/stb)
+
+add_library(stb_image_resize INTERFACE)
+target_include_directories(stb_image_resize SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/stb_image_resize)

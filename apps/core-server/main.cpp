@@ -6,6 +6,8 @@
 
 #include "rename_keys.h" // Включаем только ключи, не включая сам модуль!
 
+#include <windows.h>
+
 /**
  * @brief Константы путей для тестирования.
  * @note В будущем они должны считываться из конфигурационного файла (config.json).
@@ -20,6 +22,9 @@ inline constexpr std::string_view kScansFolderPath{ "C:/Users/TarakanovVV/Downlo
 
 int main()
 {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8); // Переключаем консоль в UTF-8
+#endif
     std::cout << "=== Run PDM System ===\n";
 
     // 1. Создаем Ядро

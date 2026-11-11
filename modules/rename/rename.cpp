@@ -104,19 +104,25 @@ void Rename::processSingleFile(const std::filesystem::path& file,
     const auto& doc{ recognizedOpt.value() };
 
     // Проверяем, является ли этот документ продолжением предыдущего
-    if(state.previousDoc.has_value() &&
-        state.previousDoc->number == doc.number &&
-        state.previousDoc->code == doc.code)
+    if (doc.sheet > 0)
     {
-        // Это следующая страница того же документа
-        ++state.currentPage;
+        state.currentPage = doc.sheet;
     }
     else
     {
-        // Это новый документ
-        state.currentPage = 1;
+        if(state.previousDoc.has_value() &&
+            state.previousDoc->number == doc.number &&
+            state.previousDoc->code == doc.code)
+        {
+            // Это следующая страница того же документа
+            ++state.currentPage;
+        }
+        else
+        {
+            // Это новый документ
+            state.currentPage = 1;
+        }
     }
-
     auto newPath{ file.parent_path() / buildNewName(doc, file, state.currentPage) };
 
     if(renameOneFile(file, newPath, logger))
