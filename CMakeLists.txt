@@ -22,6 +22,7 @@ add_subdirectory(modules)
 add_subdirectory(shared)
 add_subdirectory(tests)
 add_subdirectory(third_party)
+add_subdirectory(utilities)
 
 
 file(GLOB_RECURSE PDM_PROJECT_FILES CONFIGURE_DEPENDS
@@ -36,6 +37,7 @@ file(GLOB_RECURSE PDM_PROJECT_FILES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/modules/*
     ${CMAKE_SOURCE_DIR}/shared/*
     ${CMAKE_SOURCE_DIR}/tests/*
+    ${CMAKE_SOURCE_DIR}/utilities/*
 
 )
 

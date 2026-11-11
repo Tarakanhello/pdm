@@ -5,6 +5,8 @@
 #include <format>
 #include <iostream>
 
+#include "files_from_folder.h"
+
 namespace pdm::modules
 {
 
@@ -54,7 +56,7 @@ void Rename::execute(const shared::JobParams& params)
 
 std::vector<std::filesystem::path> Rename::getScansPathsFromFolder(std::filesystem::path folder)
 {
-    auto scanFiles{ getFilesFromFolder(folder, ".jpg", ".JPG", ".jpeg", ".JPEG") };
+    auto scanFiles{ utilities::getFilesFromFolder(folder, ".jpg", ".JPG", ".jpeg", ".JPEG") };
 
     std::ranges::sort(scanFiles);
 
