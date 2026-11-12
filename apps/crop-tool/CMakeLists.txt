@@ -2,6 +2,7 @@ add_executable(crop-tool main.cpp)
 target_link_libraries(crop-tool PRIVATE
     stb
     utilities
+    infrastructure
 )
 
 target_include_directories(crop-tool PRIVATE

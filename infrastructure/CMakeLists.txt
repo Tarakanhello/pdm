@@ -1,6 +1,8 @@
 add_library(infrastructure STATIC
     qxlsx_reader.h
     mock_stamp_recognizer.h
+    image.h
+    image.cpp
 )
 
 target_include_directories(infrastructure PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
