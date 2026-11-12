@@ -1,3 +1,14 @@
+/**
+ * @file main.cpp
+ * @brief Утилита командной строки для обрезки штампа (основной надписи) с отсканированных чертежей.
+ *
+ * @details
+ * Программа читает изображения из указанной папки, автоматически корректирует
+ * их ориентацию на основе метаданных EXIF (если сканер повернул лист),
+ * вырезает заданную область (обычно правый нижний угол) и безопасно
+ * сохраняет результат в подпапку "cropped".
+ */
+
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -6,10 +17,10 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
-
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -17,97 +28,221 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-
 #include "files_from_folder.h"
+
 
 
 namespace
 {
 
-    // 1. Отступ от правого нижнего угла (положительная ось X влево, Y вверх)
-    constexpr int kOffsetX{ 30 }; // Отступаем 30 пикселей от правого края
-    constexpr int kOffsetY{ 90 }; // Отступаем 100 пикселей от нижнего края
+    /// @brief Отступ от правого края изображения (в пикселях).
+    constexpr int kOffsetX{ 30 };
 
+    /// @brief Отступ от нижнего края изображения (в пикселях)
+    constexpr int kOffsetY{ 90 }; // Отступаем 90 пикселей от нижнего края
 
-    // 2. Фиксированный размер вырезаемого куска
+    /// @brief Ширина вырезаемой области штампа (в пикселях).
     constexpr int kCropW{ 1050 };
+
+    /// @brief Высота вырезаемой области штампа (в пикселях).
     constexpr int kCropH{ 500 };
 
+} // end namespace
 
-}
 
 
-class Image
+/**
+ * @brief Класс для работы с изображением: загрузка, поворот, обрезка и сохранение.
+ *
+ * @details Использует библиотеку stb для работы с форматами изображений и
+ * обеспечивает безопасное управление памятью (RAII) без использования сырых указателей.
+ */
+class Image final
 {
 private:
-    struct ImageRemoval
+    std::vector<unsigned char> m_image{};   ///< Сырые пиксельные данные (R, G, B, R, G, B...).
+    int m_width{};                          ///< Ширина изображения в пикселях.
+    int m_height{};                         ///< Высота изображения в пикселях.
+    int m_channels{};                       ///< Количество цветовых каналов (например, 3 для RGB, 4 для RGBA).
+
+    std::filesystem::path m_sourcePath{};   ///< Исходный путь к файлу (для перезаписи или перезагрузки).
+
+public:
+    Image() = default;
+
+    /**
+     * @brief Конструктор, создающий объект изображения из файла.
+     * @param path Путь к файлу изображения.
+     * @throws std::runtime_error Если файл не найден, пуст или поврежден.
+     */
+    Image(const std::filesystem::path& path)
+        : m_sourcePath{ path }
     {
-        void operator()(unsigned char* ptr) const noexcept
+        loadFromPath(path);
+
+        if(m_image.empty())
         {
-            stbi_image_free(ptr);
+            throw std::runtime_error(std::format("Image::Image(const std::filesystem::"
+                                                 "path&): Cannot load {}", path.string()));
         }
-    };
+    }
 
-    int m_width{};
-    int m_height{};
-    int m_channels{};
+    /// @brief Получить ширину изображения.
+    int width()     const noexcept { return m_width; }
 
-    std::unique_ptr<unsigned char, ImageRemoval> m_image{};
+    /// @brief Получить высоту изображения.
+    int height()    const noexcept { return m_height; }
 
-    std::filesystem::path m_sourcePath{};
+    /// @brief Получить количество цветовых каналов.
+    int channels()  const noexcept { return m_channels; }
 
-    static std::unique_ptr<unsigned char, ImageRemoval> loadFromPath(const std::filesystem::path& path,
-                                                                     int& w, int& h, int& c)
+
+
+    /**
+     * @brief Вырезает прямоугольную область из изображения и сохраняет её.
+     *
+     * @param cropX Координата X левого верхнего угла вырезаемой области.
+     * @param cropY Координата Y левого верхнего угла вырезаемой области.
+     * @param cropW Ширина вырезаемой области.
+     * @param cropH Высота вырезаемой области.
+     * @param out Необязательный путь для сохранения. Если не указан, перезаписывает исходный файл.
+     * @throws std::runtime_error Если координаты выходят за пределы изображения.
+     */
+    void crop(int cropX, int cropY, int cropW, int cropH,
+              std::optional<std::filesystem::path> out = std::nullopt)
+    {
+        if(cropX < 0 || cropY < 0 || cropW <= 0 || cropH <= 0 ||
+            cropX + cropW > width() || cropY + cropH > height())
+        {
+            throw std::runtime_error("Image::crop(int, int, int, int, std::optional):"
+                                     " Wrong crop coordinates");
+        }
+
+        std::vector<unsigned char> cropped(static_cast<size_t>(cropW * cropH * channels()));
+
+        // Построчное копирование пикселей
+        for(int y{ 0 }; y < cropH; ++y)
+        {
+            const unsigned char* srcRow{ get() +
+                                        static_cast<size_t>(((y + cropY) * width() + cropX)
+                                                                            * channels()) };
+
+            std::copy(srcRow,
+                      srcRow + static_cast<size_t>((cropW * channels())),
+                      cropped.data() + static_cast<size_t>(y * cropW * channels()));
+        }
+
+        const std::filesystem::path target{ out.value_or(m_sourcePath) };
+
+        if(target == m_sourcePath)
+        {
+            // Cохраняем поверх оригинала
+            saveToPath(m_sourcePath, cropW, cropH, channels(), cropped);
+            reloadFromDisk();
+        }
+        else
+        {
+            // Cохраняем в другую папку (создаем её при необходимости)
+            if (!std::filesystem::exists(target))
+            {
+                std::filesystem::create_directories(target);
+            }
+
+            saveToPath(target / std::filesystem::path{ m_sourcePath.stem().string() +
+                                                      "_cropped" +
+                                                      m_sourcePath.extension().string() },
+                       cropW, cropH, channels(), cropped);
+        }
+    }
+
+
+
+    /**
+     * @brief Проверяет, содержит ли объект валидные данные изображения.
+     */
+    explicit operator bool() const noexcept { return !m_image.empty(); }
+
+
+
+    /**
+     * @brief Получить сырой указатель на начало пиксельных данных.
+     * @return Указатель на массив байтов.
+     * @throws std::runtime_error Если изображение пустое.
+     */
+    const unsigned char* get() const
+    {
+        if(!*this)
+        {
+            throw std::runtime_error("Image::Img::get(): Empty image!");
+        }
+
+        return m_image.data();
+    }
+
+
+private:
+    /**
+     * @brief Загружает изображение из файла в память, обрабатывая EXIF-ориентацию.
+     * @param path Путь к файлу.
+     * @throws std::runtime_error При ошибках чтения или декодирования.
+     */
+    void loadFromPath(const std::filesystem::path& path)
     {
         std::ifstream in(path, std::ios::binary);
 
         if(!in)
         {
-            throw std::runtime_error(std::format("Cannot open file: {}", path.string()));
+            throw std::runtime_error(std::format("Image::loadFromPath(const std::filesystem::"
+                                                 "path&): Cannot open file: {}",
+                                                 path.string()));
         }
 
-        std::vector<unsigned char> bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>() };
+        // Читаем весь файл в буфер (для чтения EXIF и декодирования из памяти)
+        std::vector<unsigned char> bytes{std::istreambuf_iterator<char>(in),
+                                         std::istreambuf_iterator<char>() };
 
         if(bytes.empty())
         {
-            throw std::runtime_error(std::format("Empty file: {}", path.string()));
+            throw std::runtime_error(std::format("Image::loadFromPath(const std::filesystem::"
+                                                 "path&): Empty file: {}",
+                                                 path.string()));
         }
 
-        unsigned char* raw{ stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &w, &h, &c, 0) };
+        // RAII-обертка для безопасного освобождения памяти stb при исключениях
+        struct ptrDeleter
+        {
+            void operator()(unsigned char* ch)
+            {
+                stbi_image_free(ch);
+            }
+        };
+
+        std::unique_ptr<unsigned char, ptrDeleter> raw{ stbi_load_from_memory(bytes.data(),
+                                                        static_cast<int>(bytes.size()), &m_width, &m_height, &m_channels, 0) };
 
         if(!raw)
         {
-            throw std::runtime_error(std::format("Cannot decode image: {}", path.string()));
+            throw std::runtime_error(std::format("Image::loadFromPath(const std::filesystem::"
+                                                 "path&): Cannot decode image: {}",
+                                                 path.string()));
         }
 
-        std::unique_ptr<unsigned char, ImageRemoval> ptr{ raw };
+        // Копируем данные из сырого указателя в вектор (безопасное владение)
+        m_image = std::vector<unsigned char>{ raw.get(), raw.get() + static_cast<size_t>(m_width * m_height * m_channels) };
 
-        int orientation{ getExifOrOrienatition(bytes) };
-
-        if(orientation > 1)
-        {
-            Image tempImage;
-
-            tempImage.m_image = std::move(ptr);
-            tempImage.m_width = w;
-            tempImage.m_height = h;
-            tempImage.m_channels = c;
-
-            tempImage.applyOrientation(orientation);
-
-            w = tempImage.m_width;
-            h = tempImage.m_height;
-            c = tempImage.m_channels;
-
-            return std::move(tempImage.m_image);
-        }
-
-        return ptr;
+        // Применяем поворот, если этого требует EXIF
+        int orientation{ getExifOrientation(bytes) };
+        applyOrientation(orientation);
     }
 
 
 
-    // ---------- Запись: stb → буфер в памяти, потом одна операция с ФС ----------
+    /**
+     * @brief Callback-функция для stb_image_write для записи в память (вместо файла).
+     * @param context Указатель на вектор, куда пишутся байты.
+     * @param data Указатель на сжатые данные.
+     * @param size Размер данных.
+     */
     static void appendToBuffer(void* context, void* data, int size)
     {
         auto* out{ static_cast<std::vector<unsigned char>*>(context) };
@@ -115,11 +250,14 @@ private:
         out->insert(out->end(), bytes, bytes + size);
     }
 
+
+
     /**
      * @brief Ищет в JPEG-файле тег EXIF Orientation (ориентация).
+     * @param data Буфер с сырыми байтами файла.
      * @return Значение от 1 до 8 (1 - норма, 3 - 180 градусов, 6 - 90 CW, 8 - 90 CCW).
      */
-    static int getExifOrOrienatition(const std::vector<unsigned char>& data)
+    static int getExifOrientation(const std::vector<unsigned char>& data)
     {
         if(data.size() < 4 || data[0] != 0xFF || data[1] != 0xD8) // Не JPEG
         {
@@ -178,92 +316,20 @@ private:
     }
 
 
+
     /**
-     * @brief Физически поворачивает изображение в памяти.
+     * @brief Кодирует пиксели в формат файла и безопасно записывает на диск.
+     *
+     * @details Использует паттерн "атомарной записи": сначала данные пишутся во временный
+     * файл (target.tmp), и только при успехе он переименовывается в целевой. Это
+     * защищает от порчи файла при внезапном отключении питания.
+     *
+     * @param target Путь к целевому файлу.
+     * @param w Ширина изображения.
+     * @param h Высота изображения.
+     * @param c Количество каналов.
+     * @param imageInVec Вектор с пиксельными данными.
      */
-    void applyOrientation(int orientation)
-    {
-        if (orientation == 1) return;
-
-        int newW{ m_width };
-        int newH{ m_height };
-        bool swap{ (orientation == 6 || orientation == 8) };
-        if (swap)
-        {
-            newW = m_height;
-            newH = m_width;
-        }
-
-        // Вычисляем общий размер в байтах
-        const size_t srcSize{ static_cast<size_t>(m_width) * m_height * m_channels };
-        const size_t dstSize{ static_cast<size_t>(newW) * newH * m_channels };
-
-        std::vector<unsigned char> rotated(dstSize);
-
-        // Оборачиваем сырые указатели в span, чтобы анализатор знал их размер
-        std::span<const unsigned char> srcSpan(m_image.get(), srcSize);
-        std::span<unsigned char> dstSpan(rotated.data(), dstSize);
-
-        for (int y = 0; y < newH; ++y)
-        {
-            for (int x = 0; x < newW; ++x)
-            {
-                int srcX{ x };
-                int srcY{ y };
-                if (orientation == 3)
-                {
-                    srcX = m_width - 1 - x;
-                    srcY = m_height - 1 - y;
-                }
-                else if (orientation == 6)
-                {
-                    srcX = y;
-                    srcY = m_height - 1 - x;
-                }
-                else if (orientation == 8)
-                {
-                    srcX = m_width - 1 - y;
-                    srcY = x;
-                }
-
-                for (int c = 0; c < m_channels; ++c)
-                {
-                    size_t dstIdx = (static_cast<size_t>(y) * newW + x) * m_channels + c;
-                    size_t srcIdx = (static_cast<size_t>(srcY) * m_width + srcX) * m_channels + c;
-
-                    // Теперь используем безопасные span-обертки
-                    dstSpan[dstIdx] = srcSpan[srcIdx];
-                }
-            }
-        }
-
-        // =========================================================
-        // ФИНАЛЬНЫЙ БЛОК ЗАМЕНЫ ПАМЯТИ
-        // =========================================================
-
-        // Выделяем сырую память (stbi_image_free ожидает память, выделенную malloc)
-        unsigned char* newRaw = static_cast<unsigned char*>(std::malloc(dstSize));
-
-        if (newRaw)
-        {
-            // ИСПОЛЬЗУЕМ std::copy ВМЕСТО std::memcpy
-            std::copy(rotated.begin(), rotated.end(), newRaw);
-
-            // unique_ptr автоматически вызовет stbi_image_free для СТАРОЙ памяти
-            m_image.reset(newRaw);
-
-            // Обновляем размеры картинки
-            m_width = newW;
-            m_height = newH;
-            // m_channels не меняется при повороте
-        }
-        else
-        {
-            throw std::runtime_error("Failed to allocate memory for rotated image");
-        }
-    }
-
-
     static void saveToPath(const std::filesystem::path& target, int w, int h, int c, const std::vector<unsigned char>& imageInVec)
     {
         std::string extension{ target.extension().string() };
@@ -295,22 +361,23 @@ private:
         }
         else
         {
-            throw std::runtime_error("Unsupported extension: " + extension);
+            throw std::runtime_error("Image::saveToPath: Unsupported extension: " + extension);
         }
 
         if (!ok || encoded.empty())
         {
-            throw std::runtime_error("Failed to encode image data");
+            throw std::runtime_error("Image::saveToPath: Failed to encode image data");
         }
 
         std::filesystem::path tmp{ target };
         tmp += ".tmp";
 
+        // Запись во временный файл
         {
             std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
             if (!out)
             {
-                throw std::runtime_error(std::format("Cannot create file: {}", tmp.string()));
+                throw std::runtime_error(std::format("Image::saveToPath: Cannot create file: {}", tmp.string()));
             }
 
             out.write(reinterpret_cast<const char*>(encoded.data()),
@@ -320,94 +387,110 @@ private:
             {
                 std::error_code ec;
                 std::filesystem::remove(tmp, ec);
-                throw std::runtime_error(std::format("Cannot write file: {}", tmp.string()));
+                throw std::runtime_error(std::format("Image::saveToPath: Cannot write file: {}", tmp.string()));
             }
         }
 
         std::error_code ec;
         std::filesystem::remove(target, ec);
         std::filesystem::rename(tmp, target, ec);
-        if (ec)
+        if(ec)
         {
             std::filesystem::remove(tmp, ec);
-            throw std::runtime_error(std::format("Cannot replace file: {}", target.string()));
+            throw std::runtime_error(std::format("Image::saveToPath: Cannot replace file: {}", target.string()));
         }
     }
 
+
+
+    /**
+     * @brief Перезагружает изображение с диска (сбрасывает изменения в памяти).
+     */
     void reloadFromDisk()
     {
-        int w{};
-        int h{};
-        int c{};
-        auto fresh{ loadFromPath(m_sourcePath, w, h, c) };
-
-        m_image    = std::move(fresh);
-        m_width    = w;
-        m_height   = h;
-        m_channels = c;
+        *this =  Image{ m_sourcePath };
     }
 
 
 
-public:
-    Image() = default;
-
-    Image(const std::filesystem::path& path)
-        : m_image{ loadFromPath(path, m_width, m_height, m_channels) }
-        , m_sourcePath{ path }
+    /**
+     * @brief Физически поворачивает изображение в памяти согласно значению EXIF.
+     * @param orientation Ориентация (1 - норма, 3 - 180, 6 - 90 CW, 8 - 90 CCW).
+     */
+    void applyOrientation(int orientation)
     {
-        if(!m_image.get())
+        if(orientation == 1)
         {
-            throw std::runtime_error(std::format("Cannot load {}", path.string()));
-        }
-    }
-
-    explicit operator bool() const noexcept{ return m_image.get(); }
-
-    int width() const noexcept { return m_width; }
-    int height() const noexcept { return m_height; }
-    int channels() const noexcept { return m_channels; }
-
-    void crop(int cropX, int cropY, int cropW, int cropH, std::optional<std::filesystem::path> out = std::nullopt )
-    {
-        if(cropX < 0 || cropY < 0 || cropW <= 0 || cropH <= 0 ||
-            cropX + cropW > width() || cropY + cropH > height())
-        {
-            throw std::runtime_error("Wrong crop coordinates");
+            return;
         }
 
-        std::vector<unsigned char> cropped(static_cast<size_t>(cropW * cropH * channels()));
-
-        for(int y{ 0 }; y < cropH; ++y)
+        int newW{ m_width };
+        int newH{ m_height };
+        bool swap{ (orientation == 6 || orientation == 8) };
+        if(swap)
         {
-            const unsigned char* srcRow{ m_image.get() + static_cast<size_t>(((y + cropY) * width() + cropX) * channels()) };
-
-            std::copy(srcRow,
-                      srcRow + static_cast<size_t>((cropW * channels())),
-                      cropped.data() + static_cast<size_t>(y * cropW * channels()));
+            newW = m_height;
+            newH = m_width;
         }
 
-        const std::filesystem::path target{ out.value_or(m_sourcePath) };
+        const size_t dstSize{ static_cast<size_t>(newW) * newH * m_channels };
 
-        if(target == m_sourcePath)
+        std::vector<unsigned char> rotated(dstSize);
+
+        for(int y{ 0 }; y < newH; ++y)
         {
-            saveToPath(m_sourcePath, cropW, cropH, channels(), cropped);
-            reloadFromDisk();
-        }
-        else
-        {
-            if (!std::filesystem::exists(target))
+            for (int x{ 0 }; x < newW; ++x)
             {
-                std::filesystem::create_directories(target);
-            }
+                int srcX{ x };
+                int srcY{ y };
+                if(orientation == 3)
+                {
+                    srcX = m_width - 1 - x;
+                    srcY = m_height - 1 - y;
+                }
+                else if(orientation == 6)
+                {
+                    srcX = y;
+                    srcY = m_height - 1 - x;
+                }
+                else if(orientation == 8)
+                {
+                    srcX = m_width - 1 - y;
+                    srcY = x;
+                }
 
-            saveToPath(target / std::filesystem::path{ m_sourcePath.stem().string() + "_cropped" + m_sourcePath.extension().string() }, cropW, cropH, channels(), cropped);
+                for(int c{ 0 }; c < m_channels; ++c)
+                {
+                    size_t dstIdx{ (static_cast<size_t>(y) * newW + x) * m_channels + c };
+                    size_t srcIdx{ (static_cast<size_t>(srcY) * m_width + srcX) * m_channels + c };
+
+                    rotated[dstIdx] = m_image[srcIdx];
+                }
+            }
         }
+
+        m_image = std::move(rotated);
+
+        // Обновляем размеры картинки
+        m_width = newW;
+        m_height = newH;
+        // m_channels не меняется при повороте
     }
 };
 
 
 
+/**
+ * @brief Точка входа в программу.
+ *
+ * @details Ожидает один аргумент командной строки — путь к папке со сканами.
+ * Для каждого изображения вычисляет координаты правого нижнего угла
+ * (с учетом отступов) и вызывает метод обрезки.
+ *
+ * @param argc Количество аргументов.
+ * @param argv Массив аргументов. argv[1] должен содержать путь к папке.
+ * @return 0 в случае успеха, 1 при ошибке аргументов.
+ */
 int main(int argc, const char* argv[])
 {
     if(argc < 2)
