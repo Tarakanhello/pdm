@@ -36,26 +36,7 @@ Image::Image(const std::filesystem::path& path)
 void Image::crop(int cropX, int cropY, int cropW, int cropH,
           std::optional<std::filesystem::path> out)
 {
-    if(cropX < 0 || cropY < 0 || cropW <= 0 || cropH <= 0 ||
-        cropX + cropW > width() || cropY + cropH > height())
-    {
-        throw std::runtime_error("Image::crop(int, int, int, int, std::optional):"
-                                 " Wrong crop coordinates");
-    }
-
-    std::vector<unsigned char> cropped(static_cast<size_t>(cropW * cropH * channels()));
-
-    // Построчное копирование пикселей
-    for(int y{ 0 }; y < cropH; ++y)
-    {
-        const unsigned char* srcRow{ get() +
-                                    static_cast<size_t>(((y + cropY) * width() + cropX)
-                                                        * channels()) };
-
-        std::copy(srcRow,
-                  srcRow + static_cast<size_t>((cropW * channels())),
-                  cropped.data() + static_cast<size_t>(y * cropW * channels()));
-    }
+    auto cropped{ getPartOfImage(cropX, cropY, cropW, cropH) };
 
     const std::filesystem::path target{ out.value_or(m_sourcePath) };
 
@@ -78,6 +59,35 @@ void Image::crop(int cropX, int cropY, int cropW, int cropH,
                                                   m_sourcePath.extension().string() },
                    cropW, cropH, channels(), cropped);
     }
+}
+
+
+
+
+std::vector<unsigned char> Image::getPartOfImage(int cropX, int cropY, int cropW, int cropH) const
+{
+    if(cropX < 0 || cropY < 0 || cropW <= 0 || cropH <= 0 ||
+        cropX + cropW > width() || cropY + cropH > height())
+    {
+        throw std::runtime_error("Image::getPartOfImage(int, int, int, int):"
+                                 " Wrong crop coordinates");
+    }
+
+    std::vector<unsigned char> cropped(static_cast<size_t>(cropW * cropH * channels()));
+
+    // Построчное копирование пикселей
+    for(int y{ 0 }; y < cropH; ++y)
+    {
+        const unsigned char* srcRow{ get() +
+                                    static_cast<size_t>(((y + cropY) * width() + cropX)
+                                                        * channels()) };
+
+        std::copy(srcRow,
+                  srcRow + static_cast<size_t>((cropW * channels())),
+                  cropped.data() + static_cast<size_t>(y * cropW * channels()));
+    }
+
+    return cropped;
 }
 
 

@@ -63,6 +63,10 @@ public:
 
 
 
+    std::vector<unsigned char> getPartOfImage(int cropX, int cropY, int cropW, int cropH) const;
+
+
+
     /**
      * @brief Проверяет, содержит ли объект валидные данные изображения.
      */
@@ -79,6 +83,7 @@ public:
 
 
 
+private:
     /**
      * @brief Загружает изображение из файла в память, обрабатывая EXIF-ориентацию.
      * @param path Путь к файлу.
