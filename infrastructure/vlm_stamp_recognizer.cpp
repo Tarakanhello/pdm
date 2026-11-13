@@ -2,7 +2,7 @@
 
 #include <cctype>
 #include <cmath>
-#include <cstdint>
+#include <format>
 #include <iostream>
 #include <vector>
 #include <memory>
@@ -12,14 +12,9 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
-#define STB_IMAGE_IMPLEMENTATION
-#include <stb_image.h>
-
-#define STB_IMAGE_RESIZE_IMPLEMENTATION
-#include <stb_image_resize2.h>
-
-#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
+
+#include "image.h"
 
 
 namespace pdm::infrastructure
@@ -31,21 +26,17 @@ namespace pdm::infrastructure
     namespace
     {
 
-        constexpr float kMaxImageDimension{ 1024.0f };
-        constexpr int kJpegQuality{ 90 };
+        /// @brief Отступ от правого края изображения (в пикселях).
+        constexpr int kOffsetX{ 30 };
 
-        struct StbiImageDeleter
-        {
-            void operator()(unsigned char* img) const
-            {
-                if(img)
-                {
-                    stbi_image_free(img);
-                }
-            }
-        };
+        /// @brief Отступ от нижнего края изображения (в пикселях)
+        constexpr int kOffsetY{ 90 }; // Отступаем 90 пикселей от нижнего края
 
-        using UniqueStbiImage = std::unique_ptr<unsigned char, StbiImageDeleter>;
+        /// @brief Ширина вырезаемой области штампа (в пикселях).
+        constexpr int kCropW{ 1050 };
+
+        /// @brief Высота вырезаемой области штампа (в пикселях).
+        constexpr int kCropH{ 500 };
 
         /**
          * @brief Кодирование массива байтов в Base64.
@@ -86,19 +77,8 @@ namespace pdm::infrastructure
             {
                 out.push_back('=');
             }
+
             return out;
-        }
-
-
-
-        /**
-         * @brief Callback для stb_image_write, чтобы сохранить JPEG в память (в vector), а не в файл.
-         */
-        void writeToVector(void* context, void* data, int size)
-        {
-            auto* vec{ static_cast<std::vector<unsigned char>*>(context) };
-            auto* bytes{ static_cast<unsigned char*>(data) };
-            vec->insert(vec->end(), bytes, bytes + size);
         }
 
     } // end namespace
@@ -111,20 +91,22 @@ VLMStampRecognizer::VLMStampRecognizer(const std::string& serverUrl)
 
 std::string VLMStampRecognizer::encodeToBase64(const std::filesystem::path& imagePath)
 {
-    int width{};
-    int height{};
-    int channels{};
+    try
+    {
+        // 1. Загружаем картинку
+        Image img{ imagePath };
 
-    UniqueStbiImage img{ stbi_load(imagePath.string().c_str(), &width, &height, &channels, 0) };
+        // 2. Вычисляем координаты правого нижнего угла
+        int cropX{ img.width() - kOffsetX - kCropW };
+        int cropY{ img.width() - kOffsetY - kCropH };
 
-    if(!img) return "";
+        // 3. Вырезаем штамп В ПАМЯТИ (без сохранения на диск)
+        auto croppedPixels{ img.getPartOfImage(cropX, cropY, kCropW, kCropH) };
 
-    // --- ТОЧНЫЙ КРОП (Только штамп) ---
-    // Берем 35% ширины справа и 15% высоты снизу.
-    int cropW = static_cast<int>(width * 0.35f);
-    int cropH = static_cast<int>(height * 0.15f);
-    int startX = width - cropW;
-    int startY = height - cropH;
+        // 4. Сжимаем вырезанный кусок в JPEG (тоже в памяти)
+
+    }
+
 
     std::vector<unsigned char> croppedImg(cropW * cropH * channels);
 
