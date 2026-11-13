@@ -1,6 +1,7 @@
 #include "image.h"
 
 #include <algorithm>
+#include <cstring>
 #include <format>
 #include <fstream>
 #include <iostream>
@@ -43,7 +44,7 @@ void Image::crop(int cropX, int cropY, int cropW, int cropH,
     if(target == m_sourcePath)
     {
         // Cохраняем поверх оригинала
-        saveToPath(m_sourcePath, cropW, cropH, channels(), cropped);
+        cropped.save(m_sourcePath);
         reloadFromDisk();
     }
     else
@@ -54,17 +55,16 @@ void Image::crop(int cropX, int cropY, int cropW, int cropH,
             std::filesystem::create_directories(target);
         }
 
-        saveToPath(target / std::filesystem::path{ m_sourcePath.stem().string() +
+        cropped.save(target / std::filesystem::path{ m_sourcePath.stem().string() +
                                                   "_cropped" +
-                                                  m_sourcePath.extension().string() },
-                   cropW, cropH, channels(), cropped);
+                                                  m_sourcePath.extension().string() });
     }
 }
 
 
 
 
-std::vector<unsigned char> Image::getPartOfImage(int cropX, int cropY, int cropW, int cropH) const
+Image Image::getPartOfImage(int cropX, int cropY, int cropW, int cropH) const
 {
     if(cropX < 0 || cropY < 0 || cropW <= 0 || cropH <= 0 ||
         cropX + cropW > width() || cropY + cropH > height())
@@ -87,7 +87,7 @@ std::vector<unsigned char> Image::getPartOfImage(int cropX, int cropY, int cropW
                   cropped.data() + static_cast<size_t>(y * cropW * channels()));
     }
 
-    return cropped;
+    return Image{cropped, cropW, cropH, channels() };
 }
 
 
@@ -229,6 +229,20 @@ void Image::appendToBuffer(void* context, void* data, int size)
 
 
 
+void Image::save(const std::filesystem::path& target) const
+{
+    if(target.empty() && m_sourcePath.empty())
+    {
+        throw std::runtime_error("Image::save(const std::filesystem::path&): empty path. Cannot save");
+    }
+
+    saveToPath(target.empty() ? m_sourcePath : target, width(), height(), channels(), m_image);
+}
+
+
+
+
+
  void Image::saveToPath(const std::filesystem::path& target, int w, int h, int c, const std::vector<unsigned char>& imageInVec)
 {
     std::string extension{ target.extension().string() };
@@ -361,6 +375,16 @@ void Image::applyOrientation(int orientation)
     m_width = newW;
     m_height = newH;
     // m_channels не меняется при повороте
+}
+
+std::vector<std::byte> Image::convertToJpeg(int quality)
+{
+    std::vector<unsigned char> encoded;
+    stbi_write_jpg_to_func(appendToBuffer, &encoded, m_width, m_height, m_channels, get(), quality);
+
+    std::vector<std::byte> result(encoded.size());
+    std::memcpy(result.data(), encoded.data(), encoded.size());
+    return result;
 }
 
 } // end namespace pdm::infrastructure

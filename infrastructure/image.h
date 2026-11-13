@@ -30,6 +30,10 @@ private:
 public:
     Image() = default;
 
+    Image(const std::vector<unsigned char> image, int width, int height, int channels)
+        : m_image{ image }, m_width{ width }, m_height{ height }, m_channels{ channels }
+    {}
+
     /**
      * @brief Конструктор, создающий объект изображения из файла.
      * @param path Путь к файлу изображения.
@@ -63,7 +67,7 @@ public:
 
 
 
-    std::vector<unsigned char> getPartOfImage(int cropX, int cropY, int cropW, int cropH) const;
+    Image getPartOfImage(int cropX, int cropY, int cropW, int cropH) const;
 
 
 
@@ -81,6 +85,13 @@ public:
      */
     const unsigned char* get() const;
 
+
+
+    void save(const std::filesystem::path& target = {}) const;
+
+
+
+     std::vector<std::byte> convertToJpeg(int quality);
 
 
 private:

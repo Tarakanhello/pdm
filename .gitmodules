@@ -10,3 +10,9 @@
 [submodule "third_party/stb_image_resize"]
 	path = third_party/stb_image_resize
 	url = https://github.com/nothings/stb_image_resize.git
+[submodule "third_party/cpp-httplib"]
+	path = third_party/cpp-httplib
+	url = https://github.com/yhirose/cpp-httplib.git
+[submodule "third_party/nlohmann-json"]
+	path = third_party/nlohmann-json
+	url = https://github.com/nlohmann/json.git
