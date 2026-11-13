@@ -67,6 +67,16 @@ public:
 
 
 
+    /**
+     * @brief Возвращает новый объект Image, являющийся вырезанной областью текущего.
+     *
+     * @param cropX Координата X левого верхнего угла.
+     * @param cropY Координата Y левого верхнего угла.
+     * @param cropW Ширина области.
+     * @param cropH Высота области.
+     * @return Новый объект Image.
+     * @throws std::runtime_error Если координаты выходят за пределы изображения.
+     */
     Image getPartOfImage(int cropX, int cropY, int cropW, int cropH) const;
 
 
@@ -87,11 +97,22 @@ public:
 
 
 
+    /**
+     * @brief Сохраняет изображение на диск в формате, определяемом расширением файла.
+     *
+     * @param target Целевой путь. Если пустой, используется исходный путь (m_sourcePath).
+     * @throws std::runtime_error Если путь пуст или произошла ошибка записи.
+     */
     void save(const std::filesystem::path& target = {}) const;
 
 
-
-     std::vector<std::byte> convertToJpeg(int quality);
+    /**
+     * @brief Конвертирует текущее изображение в формат JPEG в памяти.
+     *
+     * @param quality Качество сжатия (от 0 до 100).
+     * @return Вектор байтов, содержащий сжатое JPEG-изображение.
+     */
+    std::vector<unsigned char> convertToJpeg(int quality) const;
 
 
 private:

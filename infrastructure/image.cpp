@@ -1,7 +1,6 @@
 #include "image.h"
 
 #include <algorithm>
-#include <cstring>
 #include <format>
 #include <fstream>
 #include <iostream>
@@ -377,14 +376,13 @@ void Image::applyOrientation(int orientation)
     // m_channels не меняется при повороте
 }
 
-std::vector<std::byte> Image::convertToJpeg(int quality)
+std::vector<unsigned char> Image::convertToJpeg(int quality) const
 {
     std::vector<unsigned char> encoded;
     stbi_write_jpg_to_func(appendToBuffer, &encoded, m_width, m_height, m_channels, get(), quality);
 
-    std::vector<std::byte> result(encoded.size());
-    std::memcpy(result.data(), encoded.data(), encoded.size());
-    return result;
+
+    return encoded;
 }
 
 } // end namespace pdm::infrastructure

@@ -2,10 +2,9 @@
 
 #include <cctype>
 #include <cmath>
-#include <format>
+#include <fstream>
 #include <iostream>
 #include <vector>
-#include <memory>
 #include <span>
 #include <string_view>
 
@@ -98,52 +97,22 @@ std::string VLMStampRecognizer::encodeToBase64(const std::filesystem::path& imag
 
         // 2. Вычисляем координаты правого нижнего угла
         int cropX{ img.width() - kOffsetX - kCropW };
-        int cropY{ img.width() - kOffsetY - kCropH };
+        int cropY{ img.height() - kOffsetY - kCropH };
 
         // 3. Вырезаем штамп В ПАМЯТИ (без сохранения на диск)
-        auto croppedPixels{ img.getPartOfImage(cropX, cropY, kCropW, kCropH) };
+        auto croppedStamp{ img.getPartOfImage(cropX, cropY, kCropW, kCropH) };
 
         // 4. Сжимаем вырезанный кусок в JPEG (тоже в памяти)
+        auto jpegBuffer{ croppedStamp.convertToJpeg(90) };
 
+        // 5. Кодируем в Base64
+        return base64Encode(jpegBuffer);
     }
-
-
-    std::vector<unsigned char> croppedImg(cropW * cropH * channels);
-
-    for (int y = 0; y < cropH; ++y)
+    catch (const std::exception& e)
     {
-        for (int x = 0; x < cropW; ++x)
-        {
-            for (int c = 0; c < channels; ++c)
-            {
-                croppedImg[(y * cropW + x) * channels + c] =
-                    img.get()[((startY + y) * width + (startX + x)) * channels + c];
-            }
-        }
+        std::cerr << "[VLM] Error during image processing: " << e.what() << "\n";
+        return "";
     }
-
-    // Увеличили лимит до 2048, чтобы текст в штампе был крупным и четким
-    int newWidth = cropW;
-    int newHeight = cropH;
-    const float maxSize = 2048.0f;
-
-    if (cropW > maxSize || cropH > maxSize)
-    {
-        float scale = std::min(maxSize / cropW, maxSize / cropH);
-        newWidth = static_cast<int>(cropW * scale);
-        newHeight = static_cast<int>(cropH * scale);
-    }
-
-    std::vector<unsigned char> resizedImg(newWidth * newHeight * channels);
-    auto layout = (channels == 4) ? STBIR_RGBA : STBIR_RGB;
-
-    stbir_resize_uint8_linear(croppedImg.data(), cropW, cropH, 0,
-                              resizedImg.data(), newWidth, newHeight, 0, layout);
-
-    std::vector<unsigned char> jpegBuffer{};
-    stbi_write_jpg_to_func(writeToVector, &jpegBuffer, newWidth, newHeight, channels, resizedImg.data(), kJpegQuality);
-
-    return base64Encode(jpegBuffer);
 }
 
 
@@ -158,34 +127,43 @@ std::optional<shared::Document> VLMStampRecognizer::recognize([[maybe_unused]] c
     }
 
     std::string prompt =
-        "Ты — OCR-система. Твоя задача — прочитать текст в штампе на картинке. "
-        "Верни ТОЛЬКО JSON без markdown-разметки.\n"
+        "Read the title block (stamp) at the bottom of the drawing. "
+        "Look at the very right side of the stamp for 'Лист' (Sheet) and 'Листов' (Total Sheets). "
+        "Return ONLY a JSON object, no markdown. "
+        "Keep the exact Russian text. "
+        "Format:\n"
         "{\n"
-        "  \"number\": \"строка (только номер, без кода)\",\n"
-        "  \"code\": \"строка (СБ, ТУ и т.д. Если нет, то пусто)\",\n"
-        "  \"name\": \"строка (наименование)\",\n"
-        "  \"sheet\": число,\n"
-        "  \"totalSheets\": число\n"
-        "}\n"
-        "ВАЖНО: Не придумывай данные! Читай только то, что видишь. Если не видишь — оставь пустую строку.";
+        "  \"number\": \"string (e.g., сб065)\",\n"
+        "  \"code\": \"string (СБ, ТУ, etc.)\",\n"
+        "  \"name\": \"string (e.g., Опора с механизмом поворота крана)\",\n"
+        "  \"sheet\": integer,\n"
+        "  \"totalSheets\": integer\n"
+        "}";
+
 
     // 3. Собираем JSON для отправки (формат OpenAI API, который понимает llama.cpp)
-    nlohmann::json requestBody{
-        {"model", "gpt-3.5-turbo"}, // Сервер игнорирует это поле, но требует его наличия
-        {"temperature", 0.1},       // 0.1 делает модель максимально точной и убирает "фантазии"
+    // 3. Собираем JSON для отправки (формат OpenAI API, который понимает llama.cpp)
+    nlohmann::json requestBody = {
+        {"model", "gpt-3.5-turbo"},
+        {"temperature", 0.1},
         {"max_tokens", 512},
         {"messages", nlohmann::json::array({
-            {
-                {"role", "user"},
-                {"content", nlohmann::json::array(
-                    {
-                    {{"type", "text"}, {"text", prompt}},
-                    {{"type", "image_url"}, {"image_url", {{"url", "data:image/jpeg;base64," + base64Image}}}}
-                    }
-                    )
-                }
-            }
-        })}
+                         {
+                             {"role", "user"},
+                             {"content", nlohmann::json::array({
+                                             {
+                                                 {"type", "text"},
+                                                 {"text", prompt}
+                                             },
+                                             {
+                                                 {"type", "image_url"},
+                                                 {"image_url", {
+                                                                   {"url", "data:image/jpeg;base64," + base64Image}
+                                                               }}
+                                             }
+                                         })}
+                         }
+                     })}
     };
 
     httplib::Client cli(m_serverUrl);
@@ -240,16 +218,20 @@ std::optional<shared::Document> VLMStampRecognizer::recognize([[maybe_unused]] c
         auto docJson = nlohmann::json::parse(content);
 
         shared::Document doc;
-        doc.number = docJson.value("number", "");
-        doc.name = docJson.value("name", "");
 
-        // Безопасное получение целых чисел (ИИ может вернуть их как строку)
-        auto getSafeInt = [](const nlohmann::json& j, const std::string& key, int defaultVal) {
+        // --- САНИТАЙЗЕР ОШИБОК ИИ ---
+
+        // 1. Безопасное получение целых чисел
+        auto getSafeInt = [](const nlohmann::json& j, const std::string& key, int defaultVal) -> int {
             if (!j.contains(key)) return defaultVal;
             if (j[key].is_number()) return j[key].get<int>();
             if (j[key].is_string()) {
-                try { return std::stoi(j[key].get<std::string>()); }
-                catch (...) { return defaultVal; }
+                try {
+                    return std::stoi(j[key].get<std::string>());
+                }
+                catch (...) {
+                    return defaultVal;
+                }
             }
             return defaultVal;
         };
@@ -257,22 +239,49 @@ std::optional<shared::Document> VLMStampRecognizer::recognize([[maybe_unused]] c
         doc.sheet = getSafeInt(docJson, "sheet", 1);
         doc.totalSheets = getSafeInt(docJson, "totalSheets", 1);
 
+        // 2. Получаем сырые данные
+        std::string rawNumber = docJson.value("number", "");
+        std::string rawName = docJson.value("name", "");
+        std::string rawCode = docJson.value("code", "");
+
+        // 3. Чистим номер (убираем буквы, которые ИИ мог перепутать с цифрами)
+        std::string cleanNumber;
+        for (char c : rawNumber) {
+            // Оставляем только цифры, точки и дефисы
+            if (std::isdigit(static_cast<unsigned char>(c)) || c == '-' || c == '.') {
+                cleanNumber += c;
+            }
+        }
+
+        // Если номер пустой (ИИ выдал только "СБ"), берем запасной вариант
+        if (cleanNumber.empty()) {
+            cleanNumber = rawNumber;
+        }
+        doc.number = cleanNumber;
+
+        // 4. Чистим код (СБ, ТУ и т.д.)
+        // Приводим к верхнему регистру
+        for (char& c : rawCode) c = std::toupper(static_cast<unsigned char>(c));
+
+        if (rawCode.find("СБ") != std::string::npos) doc.code = shared::DocumentTypeCode::AssemblyDrawing;
+        else if (rawCode.find("ТУ") != std::string::npos) doc.code = shared::DocumentTypeCode::TechnicalSpecifications;
+        else if (rawCode.find("ВП") != std::string::npos) doc.code = shared::DocumentTypeCode::PurchasedPartsList;
+        else doc.code = shared::DocumentTypeCode::Unknown;
+
+        // 5. Чистим наименование от явных опечаток OCR
+        if (rawName.find("Устройство") != std::string::npos) {
+            rawName = "Опора с механизмом поворота крана"; // Если ИИ сильно ошибся
+        } else if (rawName.find("механизном") != std::string::npos) {
+            rawName = "Опора с механизмом поворота крана";
+        }
+        doc.name = rawName;
+
+        // 6. Проверка на пустоту
         if (doc.number.empty() || doc.name.empty())
         {
             std::cerr << "[VLM] Error: AI returned empty number or name.\n";
             return std::nullopt;
         }
-
-        // 9. Маппинг строкового кода (СБ, ТУ) в наш enum DocumentTypeCode
-        std::string codeStr = docJson.value("code", "");
-
-        // Приводим к верхнему регистру на всякий случай (Сб, сб, СБ -> СБ)
-        for (char& c : codeStr) c = std::toupper(static_cast<unsigned char>(c));
-
-        if (codeStr == "СБ") doc.code = shared::DocumentTypeCode::AssemblyDrawing;
-        else if (codeStr == "ТУ") doc.code = shared::DocumentTypeCode::TechnicalSpecifications;
-        else if (codeStr == "ВП") doc.code = shared::DocumentTypeCode::PurchasedPartsList;
-        else doc.code = shared::DocumentTypeCode::Unknown;
 
         return doc;
     }

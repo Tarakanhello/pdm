@@ -18,3 +18,10 @@ target_link_libraries(infrastructure PUBLIC
     httplib
     nlohmann_json::nlohmann_json
 )
+
+# Ускоряем сборку: предварительно компилируем тяжелые библиотеки
+target_precompile_headers(infrastructure PRIVATE
+    <httplib.h>
+    <nlohmann/json.hpp>
+)
+
