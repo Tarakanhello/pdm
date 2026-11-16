@@ -31,7 +31,7 @@ namespace pdm::utilities
         {
             throw std::runtime_error("[pdm::modules::Rename::getFilesFromFolder] Error: folder path is empty");
         }
-        if(sizeof...(args) == 0)
+        if constexpr (sizeof...(args) == 0)
         {
             throw std::runtime_error("[pdm::modules::Rename::getFilesFromFolder] Error: extensions list is empty");
         }

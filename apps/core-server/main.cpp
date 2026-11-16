@@ -8,6 +8,8 @@
 
 #include <windows.h>
 
+#include <clocale>
+
 /**
  * @brief Константы путей для тестирования.
  * @note В будущем они должны считываться из конфигурационного файла (config.json).
@@ -22,6 +24,8 @@ inline constexpr std::string_view kScansFolderPath{ "C:/Users/TarakanovVV/Downlo
 
 int main()
 {
+    std::setlocale(LC_ALL, "C");
+
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8); // Переключаем консоль в UTF-8
 #endif

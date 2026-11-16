@@ -2,7 +2,8 @@
 
 #include <stdexcept>
 
-#include "mock_stamp_recognizer.h"
+//#include "mock_stamp_recognizer.h"
+#include "tesseract_stamp_recognizer.h"
 
 #include "rename.h"
 
@@ -13,14 +14,12 @@ namespace pdm::composition
         switch(id)
         {
         case shared::ModuleId::Rename:
-            // Внедряем зависимость (QxlsxReader) в модуль Rename
-            return std::make_unique<modules::Rename>(std::make_unique<infrastructure::MockStampRecognizer>());
-
+            //return std::make_unique<modules::Rename>(std::make_unique<infrastructure::MockStampRecognizer>());
+            return std::make_unique<modules::Rename>(std::make_unique<infrastructure::TesseractStampRecognizer>("C:/Users/TarakanovVV/source/Qt/pdm-core/tessdata"));
         case shared::ModuleId::NumberOfElements:
             throw std::logic_error("pdm::apps::CreateModule: Invalid ModuleId (NumberOfElements)");
         }
 
         throw std::logic_error("pdm::composition::CreateModule: unhandled ModuleId");
-        return nullptr;
     }
 }

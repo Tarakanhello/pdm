@@ -55,8 +55,6 @@ namespace pdm::shared
         }
 
         throw std::logic_error("pdm::shared::idToString: unknown ModuleId");
-
-        return "<unknown>";
     }
 
 
