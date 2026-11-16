@@ -30,7 +30,7 @@ private:
 public:
     Image() = default;
 
-    Image(const std::vector<unsigned char> image, int width, int height, int channels)
+    Image(const std::vector<unsigned char>& image, int width, int height, int channels)
         : m_image{ image }, m_width{ width }, m_height{ height }, m_channels{ channels }
     {}
 

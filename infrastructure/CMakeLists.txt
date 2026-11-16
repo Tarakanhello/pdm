@@ -3,8 +3,8 @@ add_library(infrastructure STATIC
     mock_stamp_recognizer.h
     image.h
     image.cpp
-    vlm_stamp_recognizer.h
-    vlm_stamp_recognizer.cpp
+    #vlm_stamp_recognizer.h
+    #vlm_stamp_recognizer.cpp
 )
 
 target_include_directories(infrastructure PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
