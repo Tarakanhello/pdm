@@ -14,6 +14,9 @@
 
 #include "image.h"
 
+#include <QDebug>
+#include <QString>
+
 namespace
 {
 
@@ -221,7 +224,8 @@ OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
 
     try
     {
-        std::cout << "[OpenCV-DNN] Initializing models from: " << modelsDir << "\n" << std::flush;
+        qDebug().noquote() << "[OpenCV-DNN] Initializing models from:"
+                           << QString::fromStdString(modelsDir.string());
 
         m_detNet = cv::dnn::readNetFromONNX((modelsDir / "det.onnx").string());
         m_clsNet = cv::dnn::readNetFromONNX((modelsDir / "cls.onnx").string());
@@ -250,12 +254,12 @@ OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
         }
         m_keys.push_back(" ");
 
-        std::cout << "[OpenCV-DNN] Loaded dictionary keys: " << m_keys.size() << "\n" << std::flush;
+        qDebug() << "[OpenCV-DNN] Loaded dictionary keys:" << m_keys.size();
         m_initialized = (!m_detNet.empty() && !m_clsNet.empty() && !m_recNet.empty());
 
         if (m_initialized)
         {
-            std::cout << "[OpenCV-DNN] All 3 ONNX models loaded successfully!\n" << std::flush;
+            qDebug().noquote() << "[OpenCV-DNN] All 3 ONNX models loaded successfully!\n";
         }
     }
     catch (const std::exception& e)
@@ -276,8 +280,8 @@ std::optional<shared::Document> OnnxStampRecognizer::
 
     try
     {
-        std::cout << "[OpenCV-DNN] 1. Start recognizing: " << imagePath << "\n" << std::flush;
-
+        qDebug().noquote() << "[OpenCV-DNN] 1. Start recognizing:"
+                           << QString::fromStdString(imagePath.string());
         Image img{ imagePath };
         int cropX{ std::max(0, img.width() - kOffsetX - kCropW) };
         int cropY{ std::max(0, img.height() - kOffsetY - kCropH) };
@@ -347,7 +351,7 @@ std::optional<shared::Document> OnnxStampRecognizer::
         auto boxes = findTextBoxes(probMap, scaleX, scaleY);
 
         std::ostringstream fullTextBuilder;
-        std::cout << "[OpenCV-DNN] DETECTED BLOCKS (x, y):\n";
+        qDebug().noquote() << "[OpenCV-DNN] DETECTED BLOCKS (x, y):\n";
 
         for (auto& tb : boxes)
         {
@@ -356,15 +360,14 @@ std::optional<shared::Document> OnnxStampRecognizer::
 
             constexpr int recH = 48;
             constexpr int maxRecW = 640;
-            constexpr int leftPad = 16;
-            int targetW = std::min(maxRecW - leftPad, std::max(8, int(std::round(float(crop.cols) * recH / crop.rows))));
+            int targetW = std::min(maxRecW, std::max(8, int(std::round(float(crop.cols) * recH / crop.rows))));
 
             cv::Mat resized;
             cv::resize(crop, resized, cv::Size(targetW, recH), 0, 0, cv::INTER_CUBIC);
 
-            // Белый холст с отступом слева, чтобы не обрезались первые буквы ("Б", "О")
-            cv::Mat padded(recH, maxRecW, CV_8UC3, cv::Scalar(255, 255, 255));
-            resized.copyTo(padded(cv::Rect(leftPad, 0, targetW, recH)));
+            // Заполняем пустое поле справа нейтральным серым (128 -> 0.0 после нормализации), чтобы PP-OCRv5 не генерировал шум на пустом месте
+            cv::Mat padded(recH, maxRecW, CV_8UC3, cv::Scalar(128, 128, 128));
+            resized.copyTo(padded(cv::Rect(0, 0, targetW, recH)));
 
             cv::Mat recInput;
             padded.convertTo(recInput, CV_32FC3, 1.0 / 255.0);
@@ -396,12 +399,15 @@ std::optional<shared::Document> OnnxStampRecognizer::
             tb.text = lineText;
             if (!lineText.empty())
             {
-                std::cout << "  (" << int(tb.box.front().x) << ", " << int(tb.box.front().y)
-                << "): " << lineText << "\n";
+                qDebug().noquote()
+                << QString("  (%1, %2): %3")
+                        .arg(int(tb.box.front().x))
+                        .arg(int(tb.box.front().y))
+                        .arg(QString::fromStdString(lineText));
                 fullTextBuilder << lineText << "\n";
             }
         }
-        std::cout << "-------------------\n" << std::flush;
+        qDebug().noquote() << "-------------------\n";
 
         std::string fullText = fullTextBuilder.str();
         if (fullText.empty()) return std::nullopt;
@@ -458,12 +464,14 @@ std::optional<shared::Document> OnnxStampRecognizer::
             doc.code = shared::DocumentTypeCode::TechnicalSpecifications;
         }
 
-        std::cout << "[OpenCV-DNN] PARSED -> Number: [" << doc.number
-                  << "] | Name: [" << doc.name << "]\n" << std::flush;
+        qDebug().noquote()
+            << QString("[OpenCV-DNN] PARSED -> Number: [%1] | Name: [%2]")
+                   .arg(QString::fromStdString(doc.number))
+                   .arg(QString::fromStdString(doc.name));
 
         if (doc.number.empty() || doc.name.empty())
         {
-            std::cerr << "OnnxStampRecognizer::recognize: Failed to parse text.\n" << std::flush;
+            qWarning().noquote() << "OnnxStampRecognizer::recognize: Failed to parse text.";
             return std::nullopt;
         }
 
