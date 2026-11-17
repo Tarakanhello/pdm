@@ -83,3 +83,6 @@ CMakeLists.txt.user*
 
 third_party/vcpkg/
 vcpkg_installed/
+models/*.onnx
+models/*.onnx
+third_party/onnxruntime/

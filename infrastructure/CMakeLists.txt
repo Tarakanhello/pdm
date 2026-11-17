@@ -3,6 +3,8 @@ add_library(infrastructure STATIC
     mock_stamp_recognizer.h
     image.h
     image.cpp
+    onnx_stamp_recognizer.h
+    onnx_stamp_recognizer.cpp
     #vlm_stamp_recognizer.h
     #vlm_stamp_recognizer.cpp
 )
@@ -17,6 +19,7 @@ target_link_libraries(infrastructure PUBLIC
     stb_image_resize
     httplib
     nlohmann_json::nlohmann_json
+    rapidocr
 )
 
 # Ускоряем сборку: предварительно компилируем тяжелые библиотеки
@@ -24,4 +27,3 @@ target_precompile_headers(infrastructure PRIVATE
     <httplib.h>
     <nlohmann/json.hpp>
 )
-

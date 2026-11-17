@@ -8,7 +8,6 @@ endif()
 add_subdirectory(Catch2)
 add_subdirectory(QXlsx/QXlsx)
 
-
 add_library(stb INTERFACE)
 target_include_directories(stb SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/stb)
 
@@ -25,3 +24,23 @@ endif()
 
 set(JSON_BuildTests OFF CACHE INTERNAL "")
 add_subdirectory(nlohmann-json)
+
+# --- Подключение Clipper из RapidOcrOnnx для MinGW ---
+find_package(OpenCV REQUIRED)
+
+set(RAPIDOCR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/RapidOcrOnnx")
+
+add_library(rapidocr STATIC
+    "${RAPIDOCR_DIR}/src/clipper.cpp"
+)
+
+target_include_directories(rapidocr SYSTEM PUBLIC
+    "${RAPIDOCR_DIR}/include"
+    ${OpenCV_INCLUDE_DIRS}
+)
+
+target_link_libraries(rapidocr PUBLIC ${OpenCV_LIBS})
+
+if(WIN32)
+    target_compile_definitions(rapidocr PUBLIC NOMINMAX)
+endif()
