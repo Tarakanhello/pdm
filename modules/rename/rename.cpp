@@ -4,18 +4,43 @@
 #include <algorithm>
 #include <format>
 #include <iostream>
+#include <map>
+#include <optional>
+#include <set>
+#include <string>
+#include <vector>
 
 #include "files_from_folder.h"
 
 namespace pdm::modules
 {
 
+namespace
+{
+
+struct RecognizedFile
+{
+    std::filesystem::path oldPath;
+    std::optional<shared::Document> doc;
+};
+
+struct DocumentGroup
+{
+    std::string number;
+    std::vector<size_t> indices;
+};
+
+} // end anonymuis namespace
+
+
+
 std::string Rename::buildNewName(const shared::Document& doc, const std::filesystem::path& oldPath, int page)
 {
-    // ИСПРАВЛЕНО: Если листов больше 1, добавляем " лN", иначе оставляем пустым
+    // Если листов больше 1, добавляем " лN", перед расширением
     std::string pageSuffix{ (doc.totalSheets > 1) ? (" л" + std::to_string(page)) : "" };
 
-    return std::format("{}{} {}{}{}", doc.number,
+    return std::format("{}{} {}{}{}",
+                       doc.number,
                        shared::DocumentTypeCodeToString(doc.code),
                        doc.name,
                        pageSuffix,
@@ -73,9 +98,132 @@ void Rename::performRename(const std::vector<std::filesystem::path>& scanFiles,
 
     RenameState state;
 
+    // 1. Проход 1: распознаём все сканы в папке
+    std::vector<RecognizedFile> items{};
+    items.reserve(scanFiles.size());
+
     for(const auto& file : scanFiles)
     {
-        processSingleFile(file, state, logger);
+        items.push_back({ file, m_recognizer->recognize(file) });
+    }
+
+    // 2. Формируем группы листов по документам:
+    // Лист с непустым наименованием (Форма 1) всегда открывает новый документ,
+    // а последующие листы без наименования (Форма 2а) прикрепляются к нему по совпадению number.
+    std::vector<DocumentGroup> groups{};
+    for(size_t i{ 0 }; i < items.size(); ++i)
+    {
+        if(!items[i].doc.has_value())
+        {
+            continue;
+        }
+
+        const auto& d{ items[i].doc.value() };
+
+        if(!d.name.empty())
+        {
+            groups.push_back({d.number, { i }});
+        }
+        else // Ищем последний открытый документ с таким же децимальным номером
+        {
+            auto it{ std::find_if(groups.rbegin(), groups.rend(), [&d](const DocumentGroup& g){
+                                    return g.number == d.number; }) };
+            if(it != groups.rend())
+            {
+                it->indices.push_back(i);
+            }
+            else
+            {
+                groups.push_back({ d.number, { i } });
+            }
+        }
+    }
+
+    // 3. Обогащаем метаданные внутри каждой группы (подтягиваем name, code и totalSheets с 1-го листа)
+    for(auto& group : groups)
+    {
+        std::string masterName{};
+        shared::DocumentTypeCode masterCode{ shared::DocumentTypeCode::Unknown };
+        int maxTotalSheets{ static_cast<int>(group.indices.size()) };
+
+        for(size_t idx : group.indices)
+        {
+            const auto& d{ items[idx].doc.value() };
+            if(!d.name.empty() && masterName.empty())
+            {
+                masterName = d.name;
+            }
+            if(d.code != shared::DocumentTypeCode::Unknown &&
+               masterCode == shared::DocumentTypeCode::Unknown)
+            {
+                masterCode = d.code;
+            }
+            maxTotalSheets = std::max({ maxTotalSheets, d.sheet });
+            if(d.totalSheets > 1 && d.totalSheets <= 30)
+            {
+                maxTotalSheets = std::max(maxTotalSheets, d.totalSheets);
+            }
+        }
+
+        // Назначаем уникальные номера страниц внутри документа, защищаясь от дублей при нечитаемых цифрах
+
+        std::set<int> usedSheets{};
+        for(size_t idx : group.indices)
+        {
+            auto& d{ items[idx].doc.value() };
+
+            if(!masterName.empty())
+            {
+                d.name = masterName;
+            }
+
+            if(masterCode != shared::DocumentTypeCode::Unknown)
+            {
+                d.code = masterCode;
+            }
+
+            d.totalSheets = maxTotalSheets;
+
+
+            if(!usedSheets.contains(d.sheet))
+            {
+                usedSheets.insert(d.sheet);
+            }
+            else
+            {
+                int nextFree{ 1 };
+                while(usedSheets.contains(nextFree))
+                {
+                    ++nextFree;
+                }
+                d.sheet = nextFree;
+                usedSheets.insert(nextFree);
+            }
+        }
+    }
+
+    // 4. Проход 2: переименовываем файлы и пишем лог
+    for(const auto& item : items)
+    {
+        if(!item.doc.has_value())
+        {
+            std::string errorMsg{ "Cannot recognize stamp on file" };
+            logger.log(item.oldPath.filename().string(), "UNKNOWN", "ERROR: " + errorMsg);
+            ++state.errorCount;
+            continue;
+        }
+
+        const auto& doc{ item.doc.value() };
+        auto newPath{ item.oldPath.parent_path() / buildNewName(doc, item.oldPath, doc.sheet) };
+
+        if(renameOneFile(item.oldPath, newPath, logger))
+        {
+            ++state.successCount;
+        }
+        else
+        {
+            ++state.errorCount;
+        }
     }
 
     std::cout << "\n=== Summary ===\n";

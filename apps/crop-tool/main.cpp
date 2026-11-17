@@ -29,7 +29,7 @@ constexpr int kOffsetY{ 90 }; // Отступаем 90 пикселей от н�
 constexpr int kCropW{ 1050 };
 
 /// @brief Высота вырезаемой области штампа (в пикселях).
-constexpr int kCropH{ 500 };
+constexpr int kCropH{ 580 };
 
 } // end namespace
 
