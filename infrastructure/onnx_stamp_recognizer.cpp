@@ -530,7 +530,7 @@ cv::Mat OnnxStampRecognizer::prepareRecBlob(const cv::Mat& crop)
 
     // 2. Масштабируем строку бикубической интерполяцией для сохранения чёткости мелких цифр и букв
     cv::Mat resized{};
-    cv::resize(crop, resized, cv::Size(targetW, kRecInputHeight), 0, 0, cv::INTER_CUBIC);
+    cv::resize(crop, resized, cv::Size(targetW, kRecInputHeight), 0, 0, cv::INTER_LINEAR);
 
     // 3. Дополняем кадр справа до 640 px нейтральным серым цветом (128).
     // После нормализации (128/255 - 0.5)/0.5 он даёт ~0.0, чтобы модель не галлюцинировала шум на пустом месте
@@ -813,7 +813,7 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
     cv::Mat gray{};
     if(toGrayCode == -1)
     {
-        gray = srcMat;
+        gray = srcMat.clone();
     }
     else
     {
@@ -821,12 +821,26 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
     }
 
     // 3. Локальное выравнивание контраста (CLAHE) и возврат в 3-канальный BGR для ONNX-моделей
-    cv::Mat enhanced{};
-    cv::Ptr<cv::CLAHE> clahe{ cv::createCLAHE(kClaheClipLimit, cv::Size(kClaheGridSize, kClaheGridSize)) };
-    clahe->apply(gray, enhanced);
+
+    // Проверяем, является ли скан высококонтрастным/бинарным (типично для архивных чертежей).
+    // Для бинарных сканов CLAHE усиливает точечный шум («соль и перец»), поэтому применяем медианный фильтр 3x3.
+    // Для тусклых серых сканов применяем мягкий CLAHE.
+    cv::Scalar meanVal, stdDevVal;
+    cv::meanStdDev(gray, meanVal, stdDevVal);
+
+    cv::Mat processed{};
+    if(stdDevVal[0] > 75.0)
+    {
+        cv::medianBlur(gray, processed, 3);
+    }
+    else
+    {
+        cv::Ptr<cv::CLAHE> clahe{ cv::createCLAHE(kClaheClipLimit, cv::Size(kClaheGridSize, kClaheGridSize)) };
+        clahe->apply(gray, processed);
+    }
 
     cv::Mat bgrMat{};
-    cv::cvtColor(enhanced, bgrMat, cv::COLOR_GRAY2BGR);
+    cv::cvtColor(processed, bgrMat, cv::COLOR_GRAY2BGR);
 
     return bgrMat;
 }
@@ -837,8 +851,11 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
 std::vector<OnnxStampRecognizer::TextBox> OnnxStampRecognizer::detectTextBoxes(const cv::Mat& bgrMat)
 {
     // 1. Приводим штамп к фиксированному размеру 1024x1024 и переводим пиксели из [0..255] в [0.0..1.0]
+    cv::Mat rgbMat{};
+    cv::cvtColor(bgrMat, rgbMat, cv::COLOR_BGR2RGB);
+
     cv::Mat detInput{};
-    cv::resize(bgrMat, detInput, cv::Size(kDetInputWidth, kDetInputHeight));
+    cv::resize(rgbMat, detInput, cv::Size(kDetInputWidth, kDetInputHeight));
     detInput.convertTo(detInput, CV_32FC3, kPixelScale);
 
     // 2. Применяем стандартизацию ImageNet: (pixel - mean) / std, как при обучении PP-OCRv4
@@ -846,7 +863,7 @@ std::vector<OnnxStampRecognizer::TextBox> OnnxStampRecognizer::detectTextBoxes(c
     cv::divide(detInput, kImageNetStd, detInput);
 
     // 3. Преобразуем матрицу из формата HWC в 4D-тензор NCHW (1x3x1024x1024) и меняем BGR -> RGB (swapRB = true)
-    cv::Mat detBlob{ cv::dnn::blobFromImage(detInput, 1.0, cv::Size(), cv::Scalar(), true, false) };
+    cv::Mat detBlob{ cv::dnn::blobFromImage(detInput, 1.0, cv::Size(), cv::Scalar(), false, false) };
     m_detNet.setInput(detBlob);
 
     // 4. Выполняем прямой проход нейросети, получая карту вероятностей текста размером 1024x1024
@@ -1030,7 +1047,37 @@ int OnnxStampRecognizer::recognizeRegionNumber(const cv::Mat& bgrMat,
         return 0;
     }
 
-    const std::string cellText{ recognizeCrop(m_recNet, bgrMat(validRoi), m_keys) };
+    cv::Mat cellGray{};
+    cv::cvtColor(bgrMat(validRoi), cellGray, cv::COLOR_BGR2GRAY);
+
+    // Подавляем длинные горизонтальные и вертикальные линии таблицы внутри ячейки
+    cv::Mat inv{};
+    cv::bitwise_not(cellGray, inv);
+    cv::Mat thresh{};
+    cv::threshold(inv, thresh, 128, 255, cv::THRESH_BINARY);
+
+    const int hKernelLen{ std::max(15, validRoi.width / 2) };
+    const int vKernelLen{ std::max(15, validRoi.height / 2) };
+
+    cv::Mat hLines{}, vLines{};
+    cv::morphologyEx(thresh, hLines, cv::MORPH_OPEN,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(hKernelLen, 1)));
+    cv::morphologyEx(thresh, vLines, cv::MORPH_OPEN,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, vKernelLen)));
+
+    cv::Mat linesMask{};
+    cv::bitwise_or(hLines, vLines, linesMask);
+    cv::dilate(linesMask, linesMask, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)));
+    cellGray.setTo(255, linesMask);
+
+    cv::Mat cellBgr{};
+    cv::cvtColor(cellGray, cellBgr, cv::COLOR_GRAY2BGR);
+
+    cv::Mat paddedCell{};
+    cv::copyMakeBorder(cellBgr, paddedCell, 10, 10, 10, 10,
+                       cv::BORDER_CONSTANT, cv::Scalar(255, 255, 255));
+
+    const std::string cellText{ recognizeCrop(m_recNet, paddedCell, m_keys) };
     return parseSheetNumber(cellText, isForm2aCell);
 }
 
@@ -1054,22 +1101,39 @@ void OnnxStampRecognizer::findSheetHeaders(const std::vector<TextBox>& boxes,
             continue;
         }
 
-        int inlineValue{ 0 };
-        if (matchKeywordAndExtractTail(tb.text, kTotalSheetsKeywords, inlineValue))
+        std::string currentSheetPart{ tb.text };
+
+        // 1. Сначала ищем «Листов» и отсекаем правую часть строки, если оба заголовка склеились
+        for (const auto kw : kTotalSheetsKeywords)
         {
-            totalHeaderPos = { bx, by };
-            if (inlineValue > 0 && inlineValue < kMaxReasonableTotalSheets)
+            const size_t pos{ tb.text.find(kw) };
+            if (pos != std::string::npos)
             {
-                doc.totalSheets = inlineValue;
-                totalFound = true;
+                totalHeaderPos = { bx, by };
+                const std::string tail{ tb.text.substr(pos + kw.size()) };
+                const int inlineTotal{ parseSheetNumber(tail, false) };
+
+                if (inlineTotal > 0 && inlineTotal < kMaxReasonableTotalSheets)
+                {
+                    doc.totalSheets = inlineTotal;
+                    totalFound = true;
+                }
+
+                // Оставляем только левую часть до слова «Листов» для поиска «Лист»
+                currentSheetPart = tb.text.substr(0, pos);
+                break;
             }
         }
-        else if (matchKeywordAndExtractTail(tb.text, kCurrentSheetKeywords, inlineValue))
+
+        // 2. В оставшейся (или исходной) строке ищем «Лист» и его цифру
+        int inlineSheet{ 0 };
+        if (!currentSheetPart.empty() &&
+            matchKeywordAndExtractTail(currentSheetPart, kCurrentSheetKeywords, inlineSheet))
         {
             sheetHeaderPos = { bx, by };
-            if (!sheetFound && inlineValue > 0 && inlineValue < kMaxReasonableSheetNumber)
+            if (!sheetFound && inlineSheet > 0 && inlineSheet < kMaxReasonableSheetNumber)
             {
-                doc.sheet = inlineValue;
+                doc.sheet = inlineSheet;
                 sheetFound = true;
             }
         }
@@ -1199,30 +1263,61 @@ void OnnxStampRecognizer::extractSheetNumbers(const cv::Mat& bgrMat,
         }
     }
 
-    // Для «Листов» проверяем только область справа от заголовка (снизу стоит название организации «ЗАО»)
+    // Для «Листов» проверяем область справа (Форма 1) и область снизу (Форма 2 — спецификации)
     if (!totalFound && totalHeaderPos.x > 0.0f)
     {
         const cv::Rect rightRoi{ static_cast<int>(totalHeaderPos.x) + kDirectTotalRightShiftX,
                                 static_cast<int>(totalHeaderPos.y) - kDirectRightTopPadY,
                                 kDirectRightCropW, kDirectRightCropH };
-        const int val{ recognizeRegionNumber(bgrMat, rightRoi, kMinValidCropSizePx, false) };
+        int val{ recognizeRegionNumber(bgrMat, rightRoi, kMinValidCropSizePx, false) };
+
+        if (val <= 0 || val >= kMaxReasonableTotalSheets)
+        {
+            // На Форме 2 (спецификациях) цифра общего количества листов стоит строго под заголовком «Листов»
+            const cv::Rect belowRoi{ static_cast<int>(totalHeaderPos.x) - kDirectBelowLeftPadX,
+                                    static_cast<int>(totalHeaderPos.y) + kDirectBelowShiftY,
+                                    kDirectBelowCropW, kDirectBelowCropH };
+            val = recognizeRegionNumber(bgrMat, belowRoi, kMinValidCropSizePx, false);
+        }
+
         if (val > 0 && val < kMaxReasonableTotalSheets)
         {
             doc.totalSheets = val;
+            totalFound = true;
         }
     }
 
-    // 4. Запасной поиск в правом углу Формы 2а, если заголовок «Лист» не распознался
+    // 4. Поиск номера листа на Форме 2а (когда заголовок «Лист» не найден)
     if (isForm2a && sheetHeaderPos.x < 0.0f && doc.sheet == kDefaultSheetNumber)
     {
-        const int cellX{ std::max(static_cast<int>(numPos.x + kForm2aCellMinFromNumX),
-                                 bgrMat.cols - kForm2aRightEdgeMarginX) };
-        const cv::Rect cornerRoi{ cellX, static_cast<int>(numPos.y) + kForm2aCellShiftY,
-                                 kForm2aCellCropW, kForm2aCellCropH };
-        const int val{ recognizeRegionNumber(bgrMat, cornerRoi, kMinForm2aCropSizePx, true) };
-        if (val > kDefaultSheetNumber && val < kMaxReasonableSheetNumber)
+        // 4а. Сначала ищем среди уже найденных детектором текстовых боксов в правом нижнем углу (как на Data008)
+        for (const auto& tb : boxes)
         {
-            doc.sheet = val;
+            const float bx{ tb.box.front().x };
+            const float by{ tb.box.front().y };
+            if (bx > numPos.x + kForm2aCellMinFromNumX && by >= numPos.y - 20.0f)
+            {
+                const int val{ parseSheetNumber(tb.text, true) };
+                if (val > kDefaultSheetNumber && val < kMaxReasonableSheetNumber)
+                {
+                    doc.sheet = val;
+                    break;
+                }
+            }
+        }
+
+        // 4б. Если детектор пропустил цифру — делаем прямой кроп ячейки в правом углу
+        if (doc.sheet == kDefaultSheetNumber)
+        {
+            const int cellX{ std::max(static_cast<int>(numPos.x + kForm2aCellMinFromNumX),
+                                     bgrMat.cols - kForm2aRightEdgeMarginX) };
+            const cv::Rect cornerRoi{ cellX, static_cast<int>(numPos.y) + kForm2aCellShiftY,
+                                     kForm2aCellCropW, kForm2aCellCropH };
+            const int val{ recognizeRegionNumber(bgrMat, cornerRoi, kMinForm2aCropSizePx, true) };
+            if (val > kDefaultSheetNumber && val < kMaxReasonableSheetNumber)
+            {
+                doc.sheet = val;
+            }
         }
     }
 
