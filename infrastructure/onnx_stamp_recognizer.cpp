@@ -13,7 +13,9 @@
 #include <vector>
 
 #include <opencv2/core/utils/logger.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+
 #include <clipper.hpp>
 
 #include "image.h"
@@ -24,6 +26,221 @@
 
 namespace pdm::infrastructure
 {
+
+void OnnxStampRecognizer::setDebugOutputDir(const std::filesystem::path& debugDir)
+{
+    m_debugDir = debugDir;
+    if(!m_debugDir.empty())
+    {
+        std::error_code ec{};
+        std::filesystem::create_directories(m_debugDir, ec);
+    }
+}
+
+
+
+
+std::vector<int> OnnxStampRecognizer::findLinePeaksFromEnd(const cv::Mat& projection,
+                                                           int minScore,
+                                                           int ignoreMargin,
+                                                           int minPeakDistance)
+{
+    const int len{ static_cast<int>(projection.total()) };
+    const int* ptr{ projection.ptr<int>() };
+
+    std::vector<int> peaks{};
+    for(int i{ len - 1 - ignoreMargin }; i >= ignoreMargin; --i)
+    {
+        if(ptr[i] >= minScore)
+        {
+            // Проверяем, не относится ли этот пиксель к уже найденной толстой линии
+            if(peaks.empty() || (peaks.back() - i) >= minPeakDistance)
+            {
+                peaks.push_back(i);
+            }
+            else if(ptr[i] > ptr[peaks.back()])
+            {
+                // Уточняем центр линии по максимальной яркости
+                peaks.back() = i;
+            }
+        }
+    }
+    return peaks;
+}
+
+
+
+std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const cv::Mat& fullGray)
+{
+    if(fullGray.empty() || fullGray.type() != CV_8UC1)
+    {
+        return std::nullopt;
+    }
+
+    // 1. Отрезаем по 5 мм (~25 px) справа и снизу от всего скана, чтобы отсечь чёрные поля сканера
+    constexpr int kScannerMarginPx{ 25 };
+    const int cleanW{ fullGray.cols - kScannerMarginPx };
+    const int cleanH{ fullGray.rows - kScannerMarginPx };
+    if(cleanW <= 200 || cleanH <= 200)
+    {
+        return std::nullopt;
+    }
+
+    // Вырезаем правый нижний угол очищенного листа
+    const int zoneW{ std::min(kSearchZoneWidthPx, cleanW) };
+    const int zoneH{ std::min(kSearchZoneHeightPx, cleanH) };
+    const int offsetX{ cleanW - zoneW };
+    const int offsetY{ cleanH - zoneH };
+    const cv::Mat zone{ fullGray(cv::Rect(offsetX, offsetY, zoneW, zoneH)) };
+
+    // Инвертируем (линии становятся белыми) и склеиваем мелкие разрывы скана (до 35 px)
+    cv::Mat binary{};
+    cv::threshold(zone, binary, 190, 255, cv::THRESH_BINARY_INV);
+
+    cv::Mat closedH{}, closedV{};
+    cv::morphologyEx(binary, closedH, cv::MORPH_CLOSE, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(35, 1)));
+    cv::morphologyEx(binary, closedV, cv::MORPH_CLOSE, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 25)));
+
+    cv::Mat horizMask{}, vertMask{};
+    cv::morphologyEx(closedH, horizMask, cv::MORPH_OPEN, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(200, 1)));
+    cv::morphologyEx(closedV, vertMask, cv::MORPH_OPEN, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 120)));
+
+    // 2. Двигаемся справа налево: ищем длинную вертикальную линию (правый край формата / штампа)
+    cv::Mat colSums{};
+    cv::reduce(vertMask, colSums, 0, cv::REDUCE_SUM, CV_32S);
+    const int* colPtr{ colSums.ptr<int>() };
+
+    // Находим максимальную длину вертикальной линии в правой части (последние 400 px), чтобы задать планку "самой длинной"
+    int maxVertScore{ 0 };
+    for(int x{ zoneW - 1 }; x >= std::max(0, zoneW - 400); --x)
+    {
+        maxVertScore = std::max(maxVertScore, colPtr[x]);
+    }
+    if(maxVertScore < 150 * 255)
+    {
+        return std::nullopt;
+    }
+
+    // Ищем первую длинную вертикальную линию (>= 70% от максимальной)
+    int foundX{ -1 };
+    const int minVertThreshold{ static_cast<int>(maxVertScore * 0.70) };
+    for(int x{ zoneW - 1 }; x >= std::max(0, zoneW - 400); --x)
+    {
+        if(colPtr[x] >= minVertThreshold)
+        {
+            foundX = x;
+            // Уточняем центр толстой линии в пределах +-4 px
+            for(int dx{ 1 }; dx <= 4 && (x - dx) >= 0; ++dx)
+            {
+                if(colPtr[x - dx] > colPtr[foundX])
+                {
+                    foundX = x - dx;
+                }
+            }
+            break;
+        }
+    }
+
+    if(foundX < 0)
+    {
+        return std::nullopt;
+    }
+
+    // Продолжаем двигаться влево на 5–10 мм (20..65 px): если нашли вторую длинную вертикальную линию
+    // (правую стенку самого штампа за внешней рамкой формата) — переключаемся на неё
+    const int secondMinVert{ static_cast<int>(colPtr[foundX] * 0.65) };
+    for(int x{ foundX - 20 }; x >= std::max(0, foundX - 65); --x)
+    {
+        if(colPtr[x] >= secondMinVert)
+        {
+            foundX = x;
+            for(int dx{ 1 }; dx <= 4 && (x - dx) >= 0; ++dx)
+            {
+                if(colPtr[x - dx] > colPtr[foundX])
+                {
+                    foundX = x - dx;
+                }
+            }
+            break;
+        }
+    }
+
+    // Находим самую нижнюю точку выбранной вертикальной линии (резервный Y для шага 4)
+    int vertBottomY{ -1 };
+    for(int y{ zoneH - 1 }; y >= 0; --y)
+    {
+        // Проверяем полосу +-3 px по X на случай лёгкого перекоса скана
+        bool hasPixel{ false };
+        for(int dx{ -3 }; dx <= 3; ++dx)
+        {
+            const int cx{ std::clamp(foundX + dx, 0, zoneW - 1) };
+            if(vertMask.at<uchar>(y, cx) > 0)
+            {
+                hasPixel = true;
+                break;
+            }
+        }
+        if(hasPixel)
+        {
+            vertBottomY = y;
+            break;
+        }
+    }
+
+    // 3. Двигаемся снизу вверх (в пределах нижней половины зоны — 50% высоты):
+    //    ищем НЕПРЕРЫВНЫЙ горизонтальный отрезок длиной >= 80% от ширины штампа (~800 px)
+    cv::Mat labels{}, stats{}, centroids{};
+    const int numComponents{ cv::connectedComponentsWithStats(horizMask, labels, stats, centroids) };
+
+    constexpr int kMinContinuousHorizWidthPx{ 800 }; // >= 80% ширины основной надписи (отсекает перегородку над АО 192 ЦЗЖТ)
+    const int minSearchY{ std::max(0, vertBottomY - 110) };
+
+    std::vector<int> validHorizYs{};
+    for(int c{ 1 }; c < numComponents; ++c)
+    {
+        const int compWidth{ stats.at<int>(c, cv::CC_STAT_WIDTH) };
+        const int compTop{ stats.at<int>(c, cv::CC_STAT_TOP) };
+        const int compHeight{ stats.at<int>(c, cv::CC_STAT_HEIGHT) };
+        const int centerY{ compTop + compHeight / 2 };
+
+        if(compWidth >= kMinContinuousHorizWidthPx && centerY >= minSearchY)
+        {
+            validHorizYs.push_back(centerY);
+        }
+    }
+
+    // Сортируем найденные длинные линии снизу вверх (по убыванию Y)
+    std::sort(validHorizYs.begin(), validHorizYs.end(), std::greater<int>());
+
+    int foundY{ -1 };
+    if(!validHorizYs.empty())
+    {
+        foundY = validHorizYs.at(0);
+        // Если на 5–10 мм (20..65 px) выше нижней рамки формата идёт дно штампа — берём его
+        if(validHorizYs.size() >= 2 &&
+            (validHorizYs.at(0) - validHorizYs.at(1)) >= 20 &&
+            (validHorizYs.at(0) - validHorizYs.at(1)) <= 65)
+        {
+            foundY = validHorizYs.at(1);
+        }
+    }
+
+    // 4. Если непрерывная горизонтальная линия не найдена (как на 092, где дно оборвано),
+    //    принимаем за низ конец вертикальной линии, найденной на шаге 2
+    if(foundY < 0)
+    {
+        foundY = vertBottomY;
+    }
+
+    if(foundY < 0)
+    {
+        return std::nullopt;
+    }
+
+    return cv::Point(offsetX + foundX, offsetY + foundY);
+}
+
+
 
 std::string OnnxStampRecognizer::normalizeExecutionSuffix(std::string_view rawSuffix)
 {
@@ -786,61 +1003,86 @@ OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
 
 cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imagePath)
 {
-    // 1. Загрузка скана и вырезка области основной надписи
+    // 1. Загружаем полный скан и переводим его в одноканальный серый формат OpenCV
     Image img{ imagePath };
-    int cropX{ std::max(0, img.width() - kOffsetX - kCropW) };
-    int cropY{ std::max(0, img.height() - kOffsetY - kCropH) };
-    Image stamp{ img.getPartOfImage(cropX, cropY, kCropW, kCropH) };
+    const int fullW{ img.width() };
+    const int fullH{ img.height() };
+    const int channels{ img.channels() };
+    const unsigned char* rawData{ img.get() };
 
-    const int width{ stamp.width()  };
-    const int height{ stamp.height() };
-    const int channels{ stamp.channels() };
-    const unsigned char* rawData{ stamp.get() };
-
-    if(!rawData || width <= 0 || height <= 0 || (channels != 1 && channels != 3 && channels != 4))
+    if(!rawData || fullW <= 0 || fullH <= 0 || (channels != 1 && channels != 3 && channels != 4))
     {
         return {};
     }
 
-    // 2. Перевод буфера stb_image в одноканальный серый формат OpenCV
-    // Оборачиваем сырой буфер stb_image без выделения памяти и конвертируем в BGR штатным cv::cvtColor
     const int srcType{ (channels == 1) ? CV_8UC1 : (channels == 4 ? CV_8UC4 : CV_8UC3) };
     const int toGrayCode{ (channels == 1) ? -1
-                                          : (channels == 4 ? cv::COLOR_RGBA2GRAY
-                                                           : cv::COLOR_RGB2GRAY) };
+                                         : (channels == 4 ? cv::COLOR_RGBA2GRAY
+                                                          : cv::COLOR_RGB2GRAY) };
 
-    const cv::Mat srcMat{ height, width, srcType, const_cast<unsigned char*>(rawData) };
-    cv::Mat gray{};
+    const cv::Mat srcMat{ fullH, fullW, srcType, const_cast<unsigned char*>(rawData) };
+    cv::Mat fullGray{};
     if(toGrayCode == -1)
     {
-        gray = srcMat.clone();
+        fullGray = srcMat.clone();
     }
     else
     {
-        cv::cvtColor(srcMat, gray, toGrayCode);
+        cv::cvtColor(srcMat, fullGray, toGrayCode);
     }
 
-    // 3. Локальное выравнивание контраста (CLAHE) и возврат в 3-канальный BGR для ONNX-моделей
+    // 2. Ищем правый нижний угол рамки штампа. Если найден — вырезаем строго от него;
+    //    если не найден — откатываемся на резервную вырезку от края изображения
+    int cropX{ std::max(0, fullW - kOffsetX - kCropW) };
+    int cropY{ std::max(0, fullH - kOffsetY - kCropH) };
 
-    // Проверяем, является ли скан высококонтрастным/бинарным (типично для архивных чертежей).
-    // Для бинарных сканов CLAHE усиливает точечный шум («соль и перец»), поэтому применяем медианный фильтр 3x3.
-    // Для тусклых серых сканов применяем мягкий CLAHE.
+    const auto cornerOpt{ findStampBottomRightCorner(fullGray) };
+    if(cornerOpt.has_value())
+    {
+        // Сдвигаемся от найденного правого нижнего угла влево на ширину штампа и вверх на высоту штампа
+        cropX = std::clamp(cornerOpt->x + kCornerPadRightPx - kCropW, 0, std::max(0, fullW - kCropW));
+        cropY = std::clamp(cornerOpt->y + kCornerPadBottomPx - kCropH, 0, std::max(0, fullH - kCropH));
+    }
+    else
+    {
+        qWarning().noquote() << "[OpenCV-DNN] Stamp frame corner not found, using fallback crop for:"
+                             << QString::fromStdString(imagePath.filename().string());
+    }
+
+    const int safeW{ std::min(kCropW, fullW - cropX) };
+    const int safeH{ std::min(kCropH, fullH - cropY) };
+    cv::Mat grayCrop{ fullGray(cv::Rect(cropX, cropY, safeW, safeH)).clone() };
+
+    // 3. Фильтрация шума (медианный фильтр для бинарных сканов, CLAHE — для тусклых)
     cv::Scalar meanVal, stdDevVal;
-    cv::meanStdDev(gray, meanVal, stdDevVal);
+    cv::meanStdDev(grayCrop, meanVal, stdDevVal);
 
     cv::Mat processed{};
     if(stdDevVal[0] > 75.0)
     {
-        cv::medianBlur(gray, processed, 3);
+        cv::medianBlur(grayCrop, processed, 3);
     }
     else
     {
         cv::Ptr<cv::CLAHE> clahe{ cv::createCLAHE(kClaheClipLimit, cv::Size(kClaheGridSize, kClaheGridSize)) };
-        clahe->apply(gray, processed);
+        clahe->apply(grayCrop, processed);
     }
 
     cv::Mat bgrMat{};
     cv::cvtColor(processed, bgrMat, cv::COLOR_GRAY2BGR);
+
+    // 4. Отладочный вывод в файл: рисуем зелёное перекрестие в найденном углу штампа
+    if(!m_debugDir.empty())
+    {
+        cv::Mat debugVis{ bgrMat.clone() };
+        if(cornerOpt.has_value())
+        {
+            const cv::Point localCorner{ cornerOpt->x - cropX, cornerOpt->y - cropY };
+            cv::drawMarker(debugVis, localCorner, cv::Scalar(0, 200, 0), cv::MARKER_CROSS, 40, 3);
+        }
+        const auto outPath{ m_debugDir / ("debug_" + imagePath.filename().string()) };
+        cv::imwrite(outPath.string(), debugVis);
+    }
 
     return bgrMat;
 }
@@ -1349,6 +1591,12 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
         {
             return std::nullopt;
         }
+
+        if(!m_debugDir.empty())
+        {
+            return std::nullopt;
+        }
+
 
         // 2. Находим координаты всех текстовых блоков в области штампа
         auto boxes{ detectTextBoxes(bgrMat) };

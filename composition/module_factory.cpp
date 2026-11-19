@@ -14,9 +14,12 @@ namespace pdm::composition
         switch(id)
         {
         case shared::ModuleId::Rename:
-            // Внедряем зависимость (QxlsxReader) в модуль Rename
-            return std::make_unique<modules::Rename>(std::make_unique<infrastructure::OnnxStampRecognizer>(std::filesystem::path{"../../../../models"}));
+        {// Внедряем зависимость (QxlsxReader) в модуль Rename
+            auto recognizer{ std::make_unique<infrastructure::OnnxStampRecognizer>(std::filesystem::path{"../../../../models"}) };
+            recognizer->setDebugOutputDir( {"C:/Users/TarakanovVV/Downloads/someTestFiles/scans/debug_stamps" });
 
+            return std::make_unique<modules::Rename>(std::move(recognizer));
+        }
         case shared::ModuleId::NumberOfElements:
             throw std::logic_error("pdm::apps::CreateModule: Invalid ModuleId (NumberOfElements)");
         }

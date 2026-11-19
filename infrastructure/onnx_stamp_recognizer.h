@@ -30,6 +30,7 @@ namespace pdm::infrastructure
         cv::dnn::Net m_recNet;              ///< Нейросеть распознавания символов в текстовых строках (CRNN/SVTR).
         std::vector<std::string> m_keys;    ///< Словарь символов для декодирования CTC-выхода модели.
         bool m_initialized{ false };        ///< Флаг успешной загрузки моделей и словаря.
+        std::filesystem::path m_debugDir{}; ///< Путь к папке для сохранения отладочных кропов (если пуст — отладка выключена).
 
     public:
         /**
@@ -47,6 +48,12 @@ namespace pdm::infrastructure
          *         если штамп не найден или не удалось извлечь обязательные реквизиты.
          */
         std::optional<shared::Document> recognize(const std::filesystem::path& imagePath) override;
+
+        /**
+         * @brief Включает сохранение отладочных изображений с визуализацией найденной рамки штампа.
+         * @param debugDir Путь к каталогу для сохранения `.jpg` файлов (создаётся автоматически).
+         */
+        void setDebugOutputDir(const std::filesystem::path& debugDir);
 
     private:
         /**
@@ -170,7 +177,7 @@ namespace pdm::infrastructure
          * @param imagePath Путь к файлу изображения.
          * @return 3-канальная матрица `cv::Mat` (формат `CV_8UC3`, BGR) или пустая матрица при ошибке данных.
          */
-        static cv::Mat prepareStampImage(const std::filesystem::path& imagePath);
+        cv::Mat prepareStampImage(const std::filesystem::path& imagePath);
 
         /**
          * @brief Запускает нейросеть-детектор (DBNet) на подготовленном штампе и возвращает координаты текстовых блоков.
@@ -378,7 +385,44 @@ namespace pdm::infrastructure
          */
         static std::string normalizeExecutionSuffix(std::string_view rawSuffix);
 
+        /**
+         * @brief Находит координаты правого нижнего угла рамки основной надписи на полном скане.
+         *
+         * @details Вырезает правую нижнюю область чертежа, выделяет длинные горизонтальные и
+         * вертикальные линии морфологическим открытием и находит пересечение самой нижней
+         * и самой правой линий рамки по гистограммам проекций.
+         *
+         * @param fullGray Полное изображение чертежа в градациях серого (`CV_8UC1`).
+         * @return Координаты `(x, y)` правого нижнего угла штампа на полном изображении
+         *         или `std::nullopt`, если линии рамки не обнаружены.
+         */
+        static std::optional<cv::Point> findStampBottomRightCorner(const cv::Mat& fullGray);
+
+        /**
+         * @brief Находит пики линий на 1D-проекции (гистограмме) с подавлением соседних пикселей одной линии.
+         * @param projection 1D-матрица сумм яркости вдоль строк или столбцов (`CV_32S`).
+         * @param minScore Минимальный порог суммарной яркости для признания линии валидной.
+         * @param ignoreMargin Отступ от границ зоны поиска (в пикселях).
+         * @param minPeakDistance Минимальное расстояние между двумя разными линиями рамки (в пикселях).
+         * @return Список координат найденных линий, отсортированный от края к центру (снизу вверх или справа налево).
+         */
+        static std::vector<int> findLinePeaksFromEnd(const cv::Mat& projection,
+                                                     int minScore,
+                                                     int ignoreMargin,
+                                                     int minPeakDistance);
+
     private:
+        // Параметры морфологического поиска правого нижнего угла рамки штампа
+        constexpr static int kSearchZoneWidthPx{ 1600 };        ///< Ширина области поиска в правом нижнем углу листа.
+        constexpr static int kSearchZoneHeightPx{ 1000 };       ///< Высота области поиска в правом нижнем углу листа.
+        constexpr static int kHorizLineKernelPx{ 250 };         ///< Минимальная длина горизонтальной линии рамки штампа (в пикселях).
+        constexpr static int kVertLineKernelPx{ 150 };          ///< Минимальная длина вертикальной линии рамки штампа (в пикселях).
+        constexpr static int kMinHorizLineScore{ 300 * 255 };   ///< Минимальная суммарная яркость строки (не менее 300 белых пикселей).
+        constexpr static int kMinVertLineScore{ 120 * 255 };    ///< Минимальная суммарная яркость столбца (не менее 120 белых пикселей).
+        constexpr static int kEdgeIgnoreMarginPx{ 2 };          ///< Отступ от самого края скана для отсечения чёрных полос сканера.
+        constexpr static int kCornerPadRightPx{ 25 };           ///< Запас вправо от найденного угла штампа при вырезке.
+        constexpr static int kCornerPadBottomPx{ 135 };          ///< Запас вниз от найденного угла (чтобы захватить строку «Формат»).
+
         // Параметры постобработки детектора DBNet (стандартные значения PaddleOCR / RapidOCR)
         constexpr static float kDbBoxThresh{ 0.3f };           ///< Порог бинаризации карты вероятностей (0.0..1.0).
         constexpr static float kDbBoxScoreThresh{ 0.5f };      ///< Минимальная средняя уверенность контура для отсева шума.
@@ -399,8 +443,8 @@ namespace pdm::infrastructure
         constexpr static int kCtcBlankIndex{ 0 };              ///< Индекс служебного blank-токена ("#") в словаре CTC.
 
         // Геометрия вырезки области основной надписи (правый нижний угол чертежа)
-        constexpr static int kOffsetX{ 15 };
-        constexpr static int kOffsetY{ 90 };
+        constexpr static int kOffsetX{ 5 };
+        constexpr static int kOffsetY{ 5 };
         constexpr static int kCropW{ 1120 };
         constexpr static int kCropH{ 580 };
 
@@ -427,7 +471,7 @@ namespace pdm::infrastructure
 
         // Геометрические пороги поиска многострочного наименования изделия относительно децимального номера (ГОСТ 2.104)
         constexpr static float kMaxForm1NumberY{ 330.0f };             ///< Максимальный Y номера для Формы 1/2 (ниже находится только Форма 2а без названия).
-        constexpr static float kNameSearchLeftMarginPx{ 140.0f };      ///< Допуск влево от X номера для длинных наименований и сдвинутых номеров.
+        constexpr static float kNameSearchLeftMarginPx{ 185.0f };      ///< Допуск влево от X номера для длинных наименований и сдвинутых номеров.
         constexpr static float kNameSearchRightMarginPx{ 160.0f };     ///< Допуск вправо от X номера в пределах графы наименования.
         constexpr static float kNameSearchTopOffsetPx{ 25.0f };        ///< Минимальный отступ вниз от Y номера (чтобы не захватить сам номер).
         constexpr static float kNameSearchBottomOffsetPx{ 250.0f };    ///< Максимальный отступ вниз от Y номера (отсекает графу материала).
