@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <opencv2/dnn.hpp>
@@ -25,7 +26,7 @@ namespace pdm::infrastructure
     {
     private:
         cv::dnn::Net m_detNet;              ///< Нейросеть детектора текстовых областей (DBNet).
-        cv::dnn::Net m_clsNet;              ///< Нейросеть классификатора ориентации текста.
+        // cv::dnn::Net m_clsNet;              ///< Нейросеть классификатора ориентации текста.
         cv::dnn::Net m_recNet;              ///< Нейросеть распознавания символов в текстовых строках (CRNN/SVTR).
         std::vector<std::string> m_keys;    ///< Словарь символов для декодирования CTC-выхода модели.
         bool m_initialized{ false };        ///< Флаг успешной загрузки моделей и словаря.
@@ -110,7 +111,7 @@ namespace pdm::infrastructure
          * @param from Искомая подстрока.
          * @param to Подстрока замены.
          */
-        static void replaceAll(std::string& s, const std::string& from, const std::string& to);
+        static void replaceAll(std::string& s, std::string_view from, std::string_view to);
 
         /**
          * @brief Очищает распознанное наименование изделия от латинских двойников и типовых ошибок OCR.
@@ -346,6 +347,37 @@ namespace pdm::infrastructure
          */
         static pdm::shared::DocumentTypeCode extractTrailingDocCode(std::string& tail);
 
+        /**
+         * @brief Ищет числовое значение в ячейке снизу (Форма 2) или справа (Форма 1) от указанного заголовка.
+         * @param boxes Список распознанных текстовых блоков штампа.
+         * @param headerPos Координаты левого верхнего угла блока заголовка («Лист» или «Листов»).
+         * @param minRightOffsetX Минимальный отступ вправо от заголовка для поиска в той же строке (Форма 1).
+         * @param maxRightOffsetX Максимальный отступ вправо от заголовка для поиска в той же строке (Форма 1).
+         * @param isForm2aCell Признак узкой ячейки Формы 2а для фильтрации линий рамки.
+         * @param maxValidValue Верхний допустимый предел распознанного числа (исключительно).
+         * @return Распознанное целое число в диапазоне `(0, maxValidValue)` или `std::nullopt`, если ячейка не найдена.
+         */
+        static std::optional<int> findValueNearHeader(const std::vector<TextBox>& boxes,
+                                                      const cv::Point2f& headerPos,
+                                                      float minRightOffsetX,
+                                                      float maxRightOffsetX,
+                                                      bool isForm2aCell,
+                                                      int maxValidValue);
+
+        /**
+         * @brief Удаляет указанные символы с начала и конца переданной строки на месте.
+         * @param s Изменяемая строка.
+         * @param chars Набор символов для удаления (по умолчанию — пробелы).
+         */
+        static void trimInPlace(std::string& s, std::string_view chars = " ");
+
+        /**
+         * @brief Нормализует литеру исполнения децимального номера (латинские двойники и строчную кириллицу в заглавную кириллицу).
+         * @param rawSuffix Хвостовая строка после отсечения номера и кода документа.
+         * @return Заглавная кириллическая буква в UTF-8 или пустая строка, если символ не является валидной литерой.
+         */
+        static std::string normalizeExecutionSuffix(std::string_view rawSuffix);
+
     private:
         // Параметры постобработки детектора DBNet (стандартные значения PaddleOCR / RapidOCR)
         constexpr static float kDbBoxThresh{ 0.3f };           ///< Порог бинаризации карты вероятностей (0.0..1.0).
@@ -367,9 +399,9 @@ namespace pdm::infrastructure
         constexpr static int kCtcBlankIndex{ 0 };              ///< Индекс служебного blank-токена ("#") в словаре CTC.
 
         // Геометрия вырезки области основной надписи (правый нижний угол чертежа)
-        constexpr static int kOffsetX{ 30 };
+        constexpr static int kOffsetX{ 15 };
         constexpr static int kOffsetY{ 90 };
-        constexpr static int kCropW{ 1050 };
+        constexpr static int kCropW{ 1120 };
         constexpr static int kCropH{ 580 };
 
         // Параметры адаптивного выравнивания контраста (CLAHE) для тусклых сканов
@@ -395,7 +427,7 @@ namespace pdm::infrastructure
 
         // Геометрические пороги поиска многострочного наименования изделия относительно децимального номера (ГОСТ 2.104)
         constexpr static float kMaxForm1NumberY{ 330.0f };             ///< Максимальный Y номера для Формы 1/2 (ниже находится только Форма 2а без названия).
-        constexpr static float kNameSearchLeftMarginPx{ 240.0f };      ///< Допуск влево от X номера для длинных наименований.
+        constexpr static float kNameSearchLeftMarginPx{ 245.0f };      ///< Допуск влево от X номера для длинных наименований и сдвинутых номеров.
         constexpr static float kNameSearchRightMarginPx{ 160.0f };     ///< Допуск вправо от X номера в пределах графы наименования.
         constexpr static float kNameSearchTopOffsetPx{ 25.0f };        ///< Минимальный отступ вниз от Y номера (чтобы не захватить сам номер).
         constexpr static float kNameSearchBottomOffsetPx{ 220.0f };    ///< Максимальный отступ вниз от Y номера (отсекает графу материала).
@@ -422,10 +454,10 @@ namespace pdm::infrastructure
 
         // Параметры прямого кропа ячеек через m_recNet, если DBNet пропустил мелкую цифру
         constexpr static int kDirectSheetRightShiftX{ 75 };            ///< Сдвиг вправо от «Лист» до ячейки цифры (Форма 1).
-        constexpr static int kDirectTotalRightShiftX{ 85 };            ///< Сдвиг вправо от «Листов» до ячейки цифры (Форма 1).
-        constexpr static int kDirectRightTopPadY{ 4 };                 ///< Запас вверх от Y заголовка для захвата цифры.
-        constexpr static int kDirectRightCropW{ 75 };                  ///< Ширина области прямого захвата справа от заголовка.
-        constexpr static int kDirectRightCropH{ 34 };                  ///< Высота области прямого захвата справа от заголовка.
+        constexpr static int kDirectTotalRightShiftX{ 82 };            ///< Сдвиг вправо от «Листов» до ячейки цифры (Форма 1).
+        constexpr static int kDirectRightTopPadY{ 2 };                 ///< Запас вверх от Y заголовка для захвата цифры.
+        constexpr static int kDirectRightCropW{ 36 };                  ///< Ширина области прямого захвата справа от заголовка.
+        constexpr static int kDirectRightCropH{ 30 };                  ///< Высота области прямого захвата справа от заголовка.
         constexpr static int kDirectBelowLeftPadX{ 6 };                ///< Запас влево от X заголовка при захвате снизу (Форма 2).
         constexpr static int kDirectBelowShiftY{ 26 };                 ///< Сдвиг вниз от заголовка «Лист» до ячейки цифры (Форма 2).
         constexpr static int kDirectBelowCropW{ 90 };                  ///< Ширина области прямого захвата снизу.
@@ -455,6 +487,7 @@ namespace pdm::infrastructure
         constexpr static ptrdiff_t kMinDecimalDots{ 3 };       ///< Минимум 3 точки для признания строки кандидатом в номер.
         constexpr static size_t kLastDecimalDotIndex{ 4 };     ///< Номер 4-й точки, после которой идут последние 3 цифры.
         constexpr static size_t kLastGroupDigitsCount{ 3 };    ///< Количество цифр в последней группе децимального номера.
+        constexpr static size_t kStandardDecimalDigits{ 12 };  ///< Стандартное количество цифр в децимальном номере ЕСКД.
         constexpr static size_t kUtf8CyrillicCharBytes{ 2 };   ///< Размер одной кириллической буквы в кодировке UTF-8.
 
         // Соответствие хвостов номера кодам конструкторских документов (включая типовые ошибки OCR)
@@ -467,6 +500,39 @@ namespace pdm::infrastructure
             { "ТУ", pdm::shared::DocumentTypeCode::TechnicalSpecifications },
             { "TY", pdm::shared::DocumentTypeCode::TechnicalSpecifications }
         } };
+
+        // Полнотекстовые маркеры кода документа, встречающиеся в графе наименования изделия
+        constexpr static std::array<std::pair<std::string_view, pdm::shared::DocumentTypeCode>, 2> kNameDocCodeKeywords{ {
+            { "Сборочный", pdm::shared::DocumentTypeCode::AssemblyDrawing },
+            { "Технические условия", pdm::shared::DocumentTypeCode::TechnicalSpecifications }
+        } };
+
+        // Таблица замены латинских двойников на кириллицу в наименованиях изделий (здесь 'B' -> 'В')
+        constexpr static auto kNameLatinToCyrillic = std::to_array<std::pair<std::string_view, std::string_view>>({
+            { "A", "А" }, { "B", "В" }, { "C", "С" }, { "E", "Е" }, { "H", "Н" },
+            { "K", "К" }, { "M", "М" }, { "O", "О" }, { "P", "Р" }, { "T", "Т" }, { "X", "Х" }, { "W", "Щ" },
+            { "a", "а" }, { "b", "в" }, { "c", "с" }, { "e", "е" }, { "k", "к" },
+            { "m", "т" }, { "o", "о" }, { "p", "р" }, { "u", "и" }, { "x", "х" }, { "y", "у" }, { "w", "щ" }
+        });
+
+        // Типовые словарные искажения OCR в наименованиях конструкторских документов
+        constexpr static auto kNameWordCorrections = std::to_array<std::pair<std::string_view, std::string_view>>({
+            { "Коиплект", "Комплект" },
+            { "Соорочной", "Сборочный" },
+            { "Сбороиной", "Сборочный" },
+            { "Сдорочный", "Сборочный" },
+            { "Осв", "Ось" },
+            { "Деталв", "Деталь" },
+            { "берхн", "верхн" },
+            { "Берхн", "Верхн" },
+            { "8zе3d", "Въезд" },
+            { "8ze3d", "Въезд" },
+            { "инбентарный", "инвентарный" },
+            { "иньснтарный", "инвентарный" },
+            { "РРебро", "Ребро" },
+            { "Опорабереговая", "Опора береговая" },
+            { "дереговая", "береговая" }
+        });
     };
 
 } // namespace pdm::infrastructure

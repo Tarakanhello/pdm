@@ -20,16 +20,16 @@ namespace
 {
 
 /// @brief Отступ от правого края изображения (в пикселях).
-constexpr int kOffsetX{ 30 };
+constexpr static int kOffsetX{ 15 };
 
 /// @brief Отступ от нижнего края изображения (в пикселях)
-constexpr int kOffsetY{ 90 }; // Отступаем 90 пикселей от нижнего края
+constexpr static int kOffsetY{ 90 };
 
 /// @brief Ширина вырезаемой области штампа (в пикселях).
-constexpr int kCropW{ 1050 };
+constexpr static int kCropW{ 1120 };
 
 /// @brief Высота вырезаемой области штампа (в пикселях).
-constexpr int kCropH{ 580 };
+constexpr static int kCropH{ 580 };
 
 } // end namespace
 

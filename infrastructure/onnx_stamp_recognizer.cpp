@@ -25,6 +25,49 @@
 namespace pdm::infrastructure
 {
 
+std::string OnnxStampRecognizer::normalizeExecutionSuffix(std::string_view rawSuffix)
+{
+    if (rawSuffix.size() == 1)
+    {
+        const char upper{ static_cast<char>(std::toupper(static_cast<unsigned char>(rawSuffix[0]))) };
+
+        // В литере исполнения латинская 'B' соответствует кириллической 'Б', а 'G' или 'R' — 'Г'
+        if (upper == 'B')
+        {
+            return "Б";
+        }
+        if (upper == 'G' || upper == 'R' || upper == '?')
+        {
+            return "Г";
+        }
+
+        // Остальные латинские двойники (А, С, Е, Н, К, М, О, Р, Т, Х) берём из единого справочника
+        const std::string_view key{ &upper, 1 };
+        for (const auto& [lat, cyr] : kNameLatinToCyrillic)
+        {
+            if (lat == key && lat != "W")
+            {
+                return std::string(cyr);
+            }
+        }
+
+        return "";
+    }
+
+    // Если это одиночная кириллическая буква в UTF-8 (2 байта) — приводим к заглавному регистру (например, 'г' -> 'Г')
+    if (rawSuffix.size() == kUtf8CyrillicCharBytes && (rawSuffix[0] == '\xD0' || rawSuffix[0] == '\xD1'))
+    {
+        return QString::fromUtf8(rawSuffix.data(), static_cast<qsizetype>(rawSuffix.size()))
+        .toUpper()
+            .toStdString();
+    }
+
+    return "";
+}
+
+
+
+
 std::vector<cv::Point2f> OnnxStampRecognizer::unclipBox(const std::vector<cv::Point2f>& box, float unclipRatio)
 {
      // 1. Вычисляем площадь и периметр сжатого контура DBNet (защищаемся от деления на ноль)
@@ -240,7 +283,7 @@ std::vector<OnnxStampRecognizer::TextBox> OnnxStampRecognizer::findTextBoxes(con
 
 
 
-void OnnxStampRecognizer::replaceAll(std::string& s, const std::string& from, const std::string& to)
+void OnnxStampRecognizer::replaceAll(std::string& s, std::string_view from, std::string_view to)
 {
     if(from.empty())
     {
@@ -257,44 +300,36 @@ void OnnxStampRecognizer::replaceAll(std::string& s, const std::string& from, co
 
 
 
+void OnnxStampRecognizer::trimInPlace(std::string& s, std::string_view chars)
+{
+    const size_t first{ s.find_first_not_of(chars) };
+    if (first == std::string::npos)
+    {
+        s.clear();
+        return;
+    }
+
+    const size_t last{ s.find_last_not_of(chars) };
+    s.erase(last + 1);
+    s.erase(0, first);
+}
+
+
+
+
 std::string OnnxStampRecognizer::cleanRussianName(std::string s)
 {
-    const std::vector<std::pair<std::string, std::string>> replacements = {
-        {"A", "А"}, {"B", "В"}, {"C", "С"}, {"E", "Е"}, {"H", "Н"},
-        {"K", "К"}, {"M", "М"}, {"O", "О"}, {"P", "Р"}, {"T", "Т"}, {"X", "Х"}, {"W", "Щ"},
-        {"a", "а"}, {"b", "в"}, {"c", "с"}, {"e", "е"}, {"k", "к"},
-        {"m", "т"}, {"o", "о"}, {"p", "р"}, {"u", "и"}, {"x", "х"}, {"y", "у"}, {"w", "щ"}
-    };
-
-    for(const auto& [lat, cyr] : replacements)
+    for (const auto& [lat, cyr] : kNameLatinToCyrillic)
     {
         replaceAll(s, lat, cyr);
     }
 
-    replaceAll(s, "Коиплект", "Комплект");
-    replaceAll(s, "Соорочной", "Сборочный");
-    replaceAll(s, "Сбороиной", "Сборочный");
-    replaceAll(s, "Сдорочный", "Сборочный");
-    replaceAll(s, "Осв", "Ось");
-    replaceAll(s, "Деталв", "Деталь");
-    replaceAll(s, "берхн", "верхн");
-    replaceAll(s, "Берхн", "Верхн");
-    replaceAll(s, "8zе3d", "Въезд");
-    replaceAll(s, "8ze3d", "Въезд");
-    replaceAll(s, "инбентарный", "инвентарный");
-    replaceAll(s, "иньснтарный", "инвентарный");
-    replaceAll(s, "РРебро", "Ребро");
-    replaceAll(s, "Опорабереговая", "Опора береговая");
-    replaceAll(s, "дереговая", "береговая");
+    for (const auto& [typo, fixed] : kNameWordCorrections)
+    {
+        replaceAll(s, typo, fixed);
+    }
 
-    while (!s.empty() && (s.back() == '.' || s.back() == '-' || s.back() == ' ' || s.back() == ','))
-    {
-        s.pop_back();
-    }
-    while (!s.empty() && (s.front() == '.' || s.front() == '-' || s.front() == ' '))
-    {
-        s.erase(s.begin());
-    }
+    trimInPlace(s, ".,- ");
 
     return s;
 }
@@ -304,21 +339,25 @@ std::string OnnxStampRecognizer::cleanRussianName(std::string s)
 
 std::string OnnxStampRecognizer::normalizeSuffixLetter(char ch)
 {
-    switch (ch)
+    const char upper{ static_cast<char>(std::toupper(static_cast<unsigned char>(ch))) };
+
+    // В литере исполнения децимального номера латинская 'B' соответствует кириллической 'Б' (в отличие от наименований)
+    if (upper == 'B')
     {
-    case 'A': case 'a': return "А";
-    case 'B': case 'b': return "Б";
-    case 'C': case 'c': return "С";
-    case 'E': case 'e': return "Е";
-    case 'H': case 'h': return "Н";
-    case 'K': case 'k': return "К";
-    case 'M': case 'm': return "М";
-    case 'O': case 'o': return "О";
-    case 'P': case 'p': return "Р";
-    case 'T': case 't': return "Т";
-    case 'X': case 'x': return "Х";
-    default: return "";
+        return "Б";
     }
+
+    // Остальные визуальные двойники (А, С, Е, Н, К, М, О, Р, Т, Х) берём из единой таблицы замен
+    const std::string_view key{ &upper, 1 };
+    for (const auto& [lat, cyr] : kNameLatinToCyrillic)
+    {
+        if (lat == key && lat != "W")
+        {
+            return std::string(cyr);
+        }
+    }
+
+    return "";
 }
 
 
@@ -326,10 +365,14 @@ std::string OnnxStampRecognizer::normalizeSuffixLetter(char ch)
 
 std::string OnnxStampRecognizer::fixDecimalDigitArtifacts(const std::string& rawText)
 {
+    static const std::regex kDotSpacesRegex         { R"(\s*\.\s*)" };
+    static const std::regex kColonSeparatorRegex    { R"((\d)\s*[:,;]\s*(\d))" };
+    static const std::regex kDotColonArtifactRegex  { R"(\.:|:\.)" };
+
     // 1. Нормализуем разделители групп (убираем пробелы у точек, меняем ':' и ';' между цифрами на '.')
-    std::string s{ std::regex_replace(rawText, std::regex(R"(\s*\.\s*)"), ".") };
-    s = std::regex_replace(s, std::regex(R"((\d)\s*[:,;]\s*(\d))"), "$1.$2");
-    s = std::regex_replace(s, std::regex(R"(\.:|:\.)"), ".");
+    std::string s{ std::regex_replace(rawText, kDotSpacesRegex, ".") };
+    s = std::regex_replace(s, kColonSeparatorRegex, "$1.$2");
+    s = std::regex_replace(s, kDotColonArtifactRegex, ".");
 
     if (std::count(s.begin(), s.end(), '.') < kMinDecimalDots)
     {
@@ -393,10 +436,7 @@ std::string OnnxStampRecognizer::fixDecimalDigitArtifacts(const std::string& raw
 
 pdm::shared::DocumentTypeCode OnnxStampRecognizer::extractTrailingDocCode(std::string& tail)
 {
-    while (!tail.empty() && (tail.back() == ' ' || tail.back() == '.' || tail.back() == ','))
-    {
-        tail.pop_back();
-    }
+    trimInPlace(tail, " .,");
 
     for (const auto& [codeStr, codeEnum] : kTrailingDocCodes)
     {
@@ -420,41 +460,59 @@ pdm::shared::DocumentTypeCode OnnxStampRecognizer::extractTrailingDocCode(std::s
 
 OnnxStampRecognizer::ParsedNumberInfo OnnxStampRecognizer::parseDecimalAndCode(const std::string& rawText)
 {
-    ParsedNumberInfo info{};
+    static const std::regex kBaseNumRegex{ R"((\d{3}\s*\.\s*\d{2}\s*\.\s*\d{2}\s*\.\s*\d{1,2}\s*\.\s*\d{3}))" };
+    static const std::regex kCompactNumRegex{ R"(([\d\.\s]{12,18}))" };
+    static const std::regex kWhitespaceRegex{ R"(\s+)" };
 
-    // 1. Исправляем OCR-ошибки в цифровой части и извлекаем базовый 12-значный номер
+    ParsedNumberInfo info{};
     const std::string cleaned{ fixDecimalDigitArtifacts(rawText) };
-    const std::regex baseNumRegex{ R"((\d{3}\s*\.\s*\d{2}\s*\.\s*\d{2}\s*\.\s*\d{1,2}\s*\.\s*\d{3}))" };
     std::smatch match{};
-    if (!std::regex_search(cleaned, match, baseNumRegex))
+    std::string tail{};
+
+    if (std::regex_search(cleaned, match, kBaseNumRegex))
+    {
+        // 1а. Стандартный формат с разделительными точками
+        info.number = std::regex_replace(match.str(1), kWhitespaceRegex, "");
+        tail = cleaned.substr(static_cast<size_t>(match.position() + match.length()));
+    }
+    else if (std::regex_search(cleaned, match, kCompactNumRegex))
+    {
+        // 1б. Резервный разбор, если OCR проглотил точки между группами (например, "519.111100.001A")
+        std::string digitsOnly{};
+        for (char c : match.str(1))
+        {
+            if (std::isdigit(static_cast<unsigned char>(c)))
+            {
+                digitsOnly += c;
+            }
+        }
+
+        if (digitsOnly.size() != kStandardDecimalDigits)
+        {
+            return info;
+        }
+
+        info.number = digitsOnly.substr(0, 3) + "." +
+                      digitsOnly.substr(3, 2) + "." +
+                      digitsOnly.substr(5, 2) + "." +
+                      digitsOnly.substr(7, 2) + "." +
+                      digitsOnly.substr(9, 3);
+        tail = cleaned.substr(static_cast<size_t>(match.position() + match.length()));
+    }
+    else
     {
         return info;
     }
 
-    info.number = std::regex_replace(match.str(1), std::regex(R"(\s+)"), "");
-
-    // 2. Выделяем хвостовую часть после базового номера и извлекаем из неё код документа (СБ, ТУ)
-    std::string tail{ cleaned.substr(static_cast<size_t>(match.position() + match.length())) };
+    // 2. Извлекаем код документа (СБ, ТУ) из конца хвоста
     info.code = extractTrailingDocCode(tail);
+    trimInPlace(tail, " ");
 
-    while (!tail.empty() && tail.front() == ' ')
+    // 3. Нормализуем литеру исполнения (любую кириллическую букву или латинский двойник)
+    const std::string suffix{ normalizeExecutionSuffix(tail) };
+    if (!suffix.empty())
     {
-        tail.erase(tail.begin());
-    }
-    while (!tail.empty() && tail.back() == ' ')
-    {
-        tail.pop_back();
-    }
-
-    // 3. Если в остатке осталась одна заглавная буква (например "A", "А", "Б", "В") — это литера исполнения номера
-    if (tail.size() == 1 && std::isalpha(static_cast<unsigned char>(tail[0])))
-    {
-        const std::string norm{ normalizeSuffixLetter(tail[0]) };
-        info.number += norm.empty() ? tail : norm;
-    }
-    else if (tail.size() == kUtf8CyrillicCharBytes && (tail[0] == '\xD0' || tail[0] == '\xD1'))
-    {
-        info.number += tail;
+        info.number += suffix;
     }
 
     return info;
@@ -555,16 +613,10 @@ int OnnxStampRecognizer::parseSheetNumber(const std::string& raw, bool isForm2aC
         return 0;
     }
 
-    std::string s = raw;
-    while (!s.empty() && (s.front() == 'I' || s.front() == 'l' || s.front() == '|' || s.front() == '/' || s.front() == ' '))
-    {
-        s.erase(s.begin());
-    }
-    while (!s.empty() && (s.back() == 'I' || s.back() == 'l' || s.back() == '|' || s.back() == '/' || s.back() == ']' || s.back() == ' '))
-    {
-        s.pop_back();
-    }
+    std::string s{ raw };
+    trimInPlace(s, "Il|/ ]");
 
+    // Извлекаем цифры номера листа и восстанавливаем типовые визуальные двойники OCR
     std::string digits;
     for(char c : s)
     {
@@ -574,10 +626,12 @@ int OnnxStampRecognizer::parseSheetNumber(const std::string& raw, bool isForm2aC
         }
         else if(c == 'O' || c == 'o' || c == 'D')
         {
+            // Овальные контуры латинских букв часто возникают вместо нуля в двузначных номерах (например, 10, 20)
             digits += '0';
         }
         else if(c == 'B')
         {
+            // Заглавная латинская 'B' (или кириллическая 'В') — характерный двойник цифры '8' при низком контрасте скана
             digits += '8';
         }
     }
@@ -615,16 +669,19 @@ bool OnnxStampRecognizer::isStopWord(const std::string& s)
     return s.find("Копиров") != std::string::npos ||
            s.find("Копироб") != std::string::npos ||
            s.find("Конивоб") != std::string::npos ||
-           s.find("Формат") != std::string::npos ||
-           s.find("Фопмот") != std::string::npos ||
+           s.find("Формат") != std::string::npos  ||
+           s.find("Фопмот") != std::string::npos  ||
            s.find("Сборочн") != std::string::npos ||
            s.find("Соорочн") != std::string::npos ||
-           s.find("чертеж") != std::string::npos ||
-           s.find("ГОСТ") != std::string::npos ||
-           s.find("Масса") != std::string::npos ||
+           s.find("чертеж") != std::string::npos  ||
+           s.find("ГОСТ") != std::string::npos    ||
+           s.find("Масса") != std::string::npos   ||
            s.find("Масштаб") != std::string::npos ||
-           s.find("Дата") != std::string::npos ||
-           s.find("Цата") != std::string::npos;
+           s.find("Дата") != std::string::npos    ||
+           s.find("Цата") != std::string::npos    ||
+           s.find("loma") != std::string::npos    ||
+           s.find("lomo") != std::string::npos    ||
+           s.find("Дoma") != std::string::npos;
 }
 
 
@@ -637,19 +694,25 @@ void OnnxStampRecognizer::detectDocumentCode(const std::string& text, pdm::share
         return;
     }
 
-    if(text.find("СБ") != std::string::npos ||
-        text.find("C6") != std::string::npos ||
-        text.find("C5") != std::string::npos ||
-        text.find("CB") != std::string::npos ||
-        text.find("Сборочный") != std::string::npos ||
-        text.find("Сборочный чертеж") != std::string::npos)
+    // 1. Проверяем короткие коды документов из единого справочника (исключая чисто цифровой артефакт "05",
+    //    который валиден только в конце децимального номера, но опасен в тексте наименования)
+    for(const auto& [pattern, docCode] : kTrailingDocCodes)
     {
-        code = pdm::shared::DocumentTypeCode::AssemblyDrawing;
+        if(pattern != "05" && text.find(pattern) != std::string::npos)
+        {
+            code = docCode;
+            return;
+        }
     }
-    else if(text.find("ТУ") != std::string::npos ||
-             text.find("TY") != std::string::npos)
+
+    // 2. Проверяем полнотекстовые маркеры в графе наименования
+    for(const auto& [keyword, docCode] : kNameDocCodeKeywords)
     {
-        code = pdm:: shared::DocumentTypeCode::TechnicalSpecifications;
+        if(text.find(keyword) != std::string::npos)
+        {
+            code = docCode;
+            return;
+        }
     }
 }
 
@@ -834,9 +897,7 @@ std::optional<cv::Point2f> OnnxStampRecognizer::
     locateDecimalNumber(const std::vector<TextBox>& boxes,
                         shared::Document& doc)
 {
-    constexpr float kUnsetCoordY{ -1.0f }; ///< Маркер неинициализированной координаты Y (все реальные координаты >= 0)
-
-    cv::Point2f numPos{ 0.0f, kUnsetCoordY };
+    cv::Point2f numPos{ 0.0f, kUnsetCoord };
 
     // Проходим по всем текстовым блокам и ищем децимальный номер.
     // Если в кадре два номера (верхний — случайный захват,
@@ -1018,6 +1079,47 @@ void OnnxStampRecognizer::findSheetHeaders(const std::vector<TextBox>& boxes,
 
 
 
+std::optional<int> OnnxStampRecognizer::findValueNearHeader(const std::vector<TextBox>& boxes,
+                                                            const cv::Point2f& headerPos,
+                                                            float minRightOffsetX,
+                                                            float maxRightOffsetX,
+                                                            bool isForm2aCell,
+                                                            int maxValidValue)
+{
+    if (headerPos.x <= 0.0f)
+    {
+        return std::nullopt;
+    }
+
+    for (const auto& tb : boxes)
+    {
+        const float bx{ tb.box.front().x };
+        const float by{ tb.box.front().y };
+
+        const bool isBelow{ std::abs(bx - headerPos.x) < kCellBelowMaxOffsetX &&
+                           by > headerPos.y + kCellBelowMinOffsetY &&
+                           by < headerPos.y + kCellBelowMaxOffsetY };
+
+        const bool isRight{ std::abs(by - headerPos.y) < kCellRightMaxOffsetY &&
+                           bx > headerPos.x + minRightOffsetX &&
+                           bx < headerPos.x + maxRightOffsetX };
+
+        if (isBelow || isRight)
+        {
+            const int val{ parseSheetNumber(tb.text, isForm2aCell) };
+            if (val > 0 && val < maxValidValue)
+            {
+                return val;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+
+
+
 void OnnxStampRecognizer::findSheetValuesInBoxes(const std::vector<TextBox>& boxes,
                                                  const cv::Point2f& sheetHeaderPos,
                                                  const cv::Point2f& totalHeaderPos,
@@ -1026,47 +1128,25 @@ void OnnxStampRecognizer::findSheetValuesInBoxes(const std::vector<TextBox>& box
                                                  bool& totalFound,
                                                  shared::Document& doc)
 {
-    for (const auto& tb : boxes)
+    if (!sheetFound)
     {
-        const float bx{ tb.box.front().x };
-        const float by{ tb.box.front().y };
-
-        if (!sheetFound && sheetHeaderPos.x > 0.0f)
+        if (const auto val{ findValueNearHeader(boxes, sheetHeaderPos,
+                                               kSheetRightMinOffsetX, kSheetRightMaxOffsetX,
+                                               isForm2a, kMaxReasonableSheetNumber) })
         {
-            const bool isBelow{ std::abs(bx - sheetHeaderPos.x) < kCellBelowMaxOffsetX &&
-                               by > sheetHeaderPos.y + kCellBelowMinOffsetY &&
-                               by < sheetHeaderPos.y + kCellBelowMaxOffsetY };
-            const bool isRight{ std::abs(by - sheetHeaderPos.y) < kCellRightMaxOffsetY &&
-                               bx > sheetHeaderPos.x + kSheetRightMinOffsetX &&
-                               bx < sheetHeaderPos.x + kSheetRightMaxOffsetX };
-            if (isBelow || isRight)
-            {
-                const int val{ parseSheetNumber(tb.text, isForm2a) };
-                if (val > 0 && val < kMaxReasonableSheetNumber)
-                {
-                    doc.sheet = val;
-                    sheetFound = true;
-                }
-            }
+            doc.sheet = *val;
+            sheetFound = true;
         }
+    }
 
-        if (!totalFound && totalHeaderPos.x > 0.0f)
+    if (!totalFound)
+    {
+        if (const auto val{ findValueNearHeader(boxes, totalHeaderPos,
+                                               kTotalRightMinOffsetX, kTotalRightMaxOffsetX,
+                                               false, kMaxReasonableTotalSheets) })
         {
-            const bool isBelow{ std::abs(bx - totalHeaderPos.x) < kCellBelowMaxOffsetX &&
-                               by > totalHeaderPos.y + kCellBelowMinOffsetY &&
-                               by < totalHeaderPos.y + kCellBelowMaxOffsetY };
-            const bool isRight{ std::abs(by - totalHeaderPos.y) < kCellRightMaxOffsetY &&
-                               bx > totalHeaderPos.x + kTotalRightMinOffsetX &&
-                               bx < totalHeaderPos.x + kTotalRightMaxOffsetX };
-            if (isBelow || isRight)
-            {
-                const int val{ parseSheetNumber(tb.text, false) };
-                if (val > 0 && val < kMaxReasonableTotalSheets)
-                {
-                    doc.totalSheets = val;
-                    totalFound = true;
-                }
-            }
+            doc.totalSheets = *val;
+            totalFound = true;
         }
     }
 }
