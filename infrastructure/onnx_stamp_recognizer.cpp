@@ -70,6 +70,60 @@ std::vector<int> OnnxStampRecognizer::findLinePeaksFromEnd(const cv::Mat& projec
 
 
 
+/**
+ * @brief Выравнивает небольшой перекос скана (в пределах +-5 градусов) по длинным линиям рамки.
+ * @param gray Исходное изображение в градациях серого (`CV_8UC1`).
+ * @return Выровненное изображение (или копия исходного, если наклон меньше 0.15 градуса).
+ */
+cv::Mat deskewGrayImage(const cv::Mat& gray)
+{
+    cv::Mat small{};
+    cv::resize(gray, small, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
+
+    cv::Mat edges{};
+    cv::Canny(small, edges, 50, 150, 3);
+
+    std::vector<cv::Vec4i> lines{};
+    cv::HoughLinesP(edges, lines, 1, CV_PI / 180.0, 100, small.cols * 0.25, 20);
+
+    std::vector<double> angles{};
+    for(const auto& l : lines)
+    {
+        const double dx{ static_cast<double>(l[2] - l[0]) };
+        const double dy{ static_cast<double>(l[3] - l[1]) };
+        if(std::abs(dx) > std::abs(dy))
+        {
+            const double deg{ std::atan2(dy, dx) * 180.0 / CV_PI };
+            if(std::abs(deg) <= 5.0)
+            {
+                angles.push_back(deg);
+            }
+        }
+    }
+
+    if(angles.empty())
+    {
+        return gray;
+    }
+
+    std::sort(angles.begin(), angles.end());
+    const double medianAngle{ angles.at(angles.size() / 2) };
+
+    if(std::abs(medianAngle) < 0.15)
+    {
+        return gray;
+    }
+
+    const cv::Point2f center{ gray.cols * 0.5f, gray.rows * 0.5f };
+    const cv::Mat rotMat{ cv::getRotationMatrix2D(center, medianAngle, 1.0) };
+
+    cv::Mat rotated{};
+    cv::warpAffine(gray, rotated, rotMat, gray.size(), cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(255));
+    return rotated;
+}
+
+
+
 std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const cv::Mat& fullGray)
 {
     if(fullGray.empty() || fullGray.type() != CV_8UC1)
@@ -105,102 +159,80 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
     cv::morphologyEx(closedH, horizMask, cv::MORPH_OPEN, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(200, 1)));
     cv::morphologyEx(closedV, vertMask, cv::MORPH_OPEN, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 120)));
 
-    // 2. Двигаемся справа налево: ищем длинную вертикальную линию (правый край формата / штампа)
-    cv::Mat colSums{};
-    cv::reduce(vertMask, colSums, 0, cv::REDUCE_SUM, CV_32S);
-    const int* colPtr{ colSums.ptr<int>() };
+    // 2. Поиск вертикальной линии (аналогично горизонтальной — через непрерывные компоненты):
+    //    ищем вертикальную линию длиной >= 80% от высоты зоны поиска в правых 20% ширины скана
+    cv::Mat vLabels{}, vStats{}, vCentroids{};
+    const int numVComps{ cv::connectedComponentsWithStats(vertMask, vLabels, vStats, vCentroids) };
 
-    // Находим максимальную длину вертикальной линии в правой части (последние 400 px), чтобы задать планку "самой длинной"
-    int maxVertScore{ 0 };
-    for(int x{ zoneW - 1 }; x >= std::max(0, zoneW - 400); --x)
+    const int minContinuousVertHeightPx{ static_cast<int>(zoneH * 0.80) };
+    const int rightSearchWidthPx{ std::min(zoneW, static_cast<int>(fullGray.cols * 0.20)) };
+    const int minVertSearchX{ std::max(0, zoneW - rightSearchWidthPx) };
+
+    struct VertLineInfo
     {
-        maxVertScore = std::max(maxVertScore, colPtr[x]);
-    }
-    if(maxVertScore < 150 * 255)
+        int centerX{ 0 };
+        int bottomY{ 0 };
+    };
+    std::vector<VertLineInfo> validVertLines{};
+
+    for(int c{ 1 }; c < numVComps; ++c)
     {
-        return std::nullopt;
+        const int compLeft{ vStats.at<int>(c, cv::CC_STAT_LEFT) };
+        const int compTop{ vStats.at<int>(c, cv::CC_STAT_TOP) };
+        const int compWidth{ vStats.at<int>(c, cv::CC_STAT_WIDTH) };
+        const int compHeight{ vStats.at<int>(c, cv::CC_STAT_HEIGHT) };
+        const int centerX{ compLeft + compWidth / 2 };
+
+        if(compHeight >= minContinuousVertHeightPx && centerX >= minVertSearchX)
+        {
+            validVertLines.push_back({ centerX, compTop + compHeight - 1 });
+        }
     }
 
-    // Ищем первую длинную вертикальную линию (>= 70% от максимальной)
+    // Сортируем найденные длинные вертикальные линии справа налево (по убыванию X)
+    std::sort(validVertLines.begin(), validVertLines.end(), [](const VertLineInfo& a, const VertLineInfo& b) {
+        return a.centerX > b.centerX;
+    });
+
     int foundX{ -1 };
-    const int minVertThreshold{ static_cast<int>(maxVertScore * 0.70) };
-    for(int x{ zoneW - 1 }; x >= std::max(0, zoneW - 400); --x)
-    {
-        if(colPtr[x] >= minVertThreshold)
-        {
-            foundX = x;
-            // Уточняем центр толстой линии в пределах +-4 px
-            for(int dx{ 1 }; dx <= 4 && (x - dx) >= 0; ++dx)
-            {
-                if(colPtr[x - dx] > colPtr[foundX])
-                {
-                    foundX = x - dx;
-                }
-            }
-            break;
-        }
-    }
-
-    if(foundX < 0)
-    {
-        return std::nullopt;
-    }
-
-    // Продолжаем двигаться влево на 5–10 мм (20..65 px): если нашли вторую длинную вертикальную линию
-    // (правую стенку самого штампа за внешней рамкой формата) — переключаемся на неё
-    const int secondMinVert{ static_cast<int>(colPtr[foundX] * 0.65) };
-    for(int x{ foundX - 20 }; x >= std::max(0, foundX - 65); --x)
-    {
-        if(colPtr[x] >= secondMinVert)
-        {
-            foundX = x;
-            for(int dx{ 1 }; dx <= 4 && (x - dx) >= 0; ++dx)
-            {
-                if(colPtr[x - dx] > colPtr[foundX])
-                {
-                    foundX = x - dx;
-                }
-            }
-            break;
-        }
-    }
-
-    // Находим самую нижнюю точку выбранной вертикальной линии (резервный Y для шага 4)
     int vertBottomY{ -1 };
-    for(int y{ zoneH - 1 }; y >= 0; --y)
+
+    if(!validVertLines.empty())
     {
-        // Проверяем полосу +-3 px по X на случай лёгкого перекоса скана
-        bool hasPixel{ false };
-        for(int dx{ -3 }; dx <= 3; ++dx)
+        foundX = validVertLines.at(0).centerX;
+        vertBottomY = validVertLines.at(0).bottomY;
+
+        // Если на 5–10 мм (20..65 px) левее внешней рамки формата идёт стенка штампа — переключаемся на неё
+        if(validVertLines.size() >= 2 &&
+            (validVertLines.at(0).centerX - validVertLines.at(1).centerX) >= 20 &&
+            (validVertLines.at(0).centerX - validVertLines.at(1).centerX) <= 65)
         {
-            const int cx{ std::clamp(foundX + dx, 0, zoneW - 1) };
-            if(vertMask.at<uchar>(y, cx) > 0)
-            {
-                hasPixel = true;
-                break;
-            }
-        }
-        if(hasPixel)
-        {
-            vertBottomY = y;
-            break;
+            foundX = validVertLines.at(1).centerX;
+            vertBottomY = validVertLines.at(1).bottomY;
         }
     }
+    else
+    {
+        // Фоллбэк (пункт 1): если длинная вертикальная линия в правых 20% скана не найдена,
+        // ставим точку внизу очищенного скана (с учётом 5 мм отступа от правого края)
+        foundX = zoneW - 1;
+        vertBottomY = zoneH - 1;
+    }
 
-    // 3. Двигаемся снизу вверх (в пределах нижней половины зоны — 50% высоты):
-    //    ищем НЕПРЕРЫВНЫЙ горизонтальный отрезок длиной >= 80% от ширины штампа (~800 px)
-    cv::Mat labels{}, stats{}, centroids{};
-    const int numComponents{ cv::connectedComponentsWithStats(horizMask, labels, stats, centroids) };
+    // 3. Поиск горизонтальной линии снизу вверх:
+    //    ищем НЕПРЕРЫВНЫЙ горизонтальный отрезок длиной >= 800 px в пределах 110 px от низа вертикали
+    cv::Mat hLabels{}, hStats{}, hCentroids{};
+    const int numHComps{ cv::connectedComponentsWithStats(horizMask, hLabels, hStats, hCentroids) };
 
-    constexpr int kMinContinuousHorizWidthPx{ 800 }; // >= 80% ширины основной надписи (отсекает перегородку над АО 192 ЦЗЖТ)
+    constexpr int kMinContinuousHorizWidthPx{ 800 };
     const int minSearchY{ std::max(0, vertBottomY - 110) };
 
     std::vector<int> validHorizYs{};
-    for(int c{ 1 }; c < numComponents; ++c)
+    for(int c{ 1 }; c < numHComps; ++c)
     {
-        const int compWidth{ stats.at<int>(c, cv::CC_STAT_WIDTH) };
-        const int compTop{ stats.at<int>(c, cv::CC_STAT_TOP) };
-        const int compHeight{ stats.at<int>(c, cv::CC_STAT_HEIGHT) };
+        const int compWidth{ hStats.at<int>(c, cv::CC_STAT_WIDTH) };
+        const int compTop{ hStats.at<int>(c, cv::CC_STAT_TOP) };
+        const int compHeight{ hStats.at<int>(c, cv::CC_STAT_HEIGHT) };
         const int centerY{ compTop + compHeight / 2 };
 
         if(compWidth >= kMinContinuousHorizWidthPx && centerY >= minSearchY)
@@ -209,24 +241,23 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
         }
     }
 
-    // Сортируем найденные длинные линии снизу вверх (по убыванию Y)
     std::sort(validHorizYs.begin(), validHorizYs.end(), std::greater<int>());
 
     int foundY{ -1 };
     if(!validHorizYs.empty())
     {
         foundY = validHorizYs.at(0);
-        // Если на 5–10 мм (20..65 px) выше нижней рамки формата идёт дно штампа — берём его
+        // Уменьшенный шаг перехода (15..42 px): перепрыгивает только с внешней рамки формата на дно штампа,
+        // но не достаёт до верхней границы штампа Формы 2а (~75–85 px)
         if(validHorizYs.size() >= 2 &&
-            (validHorizYs.at(0) - validHorizYs.at(1)) >= 20 &&
-            (validHorizYs.at(0) - validHorizYs.at(1)) <= 65)
+            (validHorizYs.at(0) - validHorizYs.at(1)) >= 15 &&
+            (validHorizYs.at(0) - validHorizYs.at(1)) <= 42)
         {
             foundY = validHorizYs.at(1);
         }
     }
 
-    // 4. Если непрерывная горизонтальная линия не найдена (как на 092, где дно оборвано),
-    //    принимаем за низ конец вертикальной линии, найденной на шаге 2
+    // 4. Фоллбэк по вертикали, если длинная горизонтальная линия внизу оборвана
     if(foundY < 0)
     {
         foundY = vertBottomY;
@@ -1074,14 +1105,20 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
     // 4. Отладочный вывод в файл: рисуем зелёное перекрестие в найденном углу штампа
     if(!m_debugDir.empty())
     {
-        cv::Mat debugVis{ bgrMat.clone() };
+        cv::Mat fullDebugVis{};
+        cv::cvtColor(fullGray, fullDebugVis, cv::COLOR_GRAY2BGR);
+
+        // Рисуем синюю рамку области, которая будет вырезана для распознавания
+        cv::rectangle(fullDebugVis, cv::Rect(cropX, cropY, safeW, safeH), cv::Scalar(255, 0, 0), 3);
+
+        // Рисуем крупный зелёный крест в найденной точке (толщина 6 px, размер 80 px, чтобы было видно на большом листе)
         if(cornerOpt.has_value())
         {
-            const cv::Point localCorner{ cornerOpt->x - cropX, cornerOpt->y - cropY };
-            cv::drawMarker(debugVis, localCorner, cv::Scalar(0, 200, 0), cv::MARKER_CROSS, 40, 3);
+            cv::drawMarker(fullDebugVis, *cornerOpt, cv::Scalar(0, 200, 0), cv::MARKER_CROSS, 80, 6);
         }
-        const auto outPath{ m_debugDir / ("debug_" + imagePath.filename().string()) };
-        cv::imwrite(outPath.string(), debugVis);
+
+        const auto outPath{ m_debugDir / ("debug_full_" + imagePath.filename().string()) };
+        cv::imwrite(outPath.string(), fullDebugVis);
     }
 
     return bgrMat;
