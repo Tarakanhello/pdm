@@ -446,7 +446,7 @@ namespace pdm::infrastructure
         constexpr static int kOffsetX{ 5 };
         constexpr static int kOffsetY{ 5 };
         constexpr static int kCropW{ 1150 };
-        constexpr static int kCropH{ 580 };
+        constexpr static int kCropH{ 650 };
 
         // Параметры адаптивного выравнивания контраста (CLAHE) для тусклых сканов
         constexpr static double kClaheClipLimit{ 2.0 };
