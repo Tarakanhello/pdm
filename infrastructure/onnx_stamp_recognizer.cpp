@@ -122,7 +122,7 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
     cv::Mat binary{};
     cv::adaptiveThreshold(denoised, binary, 255,
                           cv::ADAPTIVE_THRESH_GAUSSIAN_C,
-                          cv::THRESH_BINARY_INV, 25, 12);
+                          cv::THRESH_BINARY_INV, 25, 20);
 
     // Обнуляем найденные чёрные полосы сканера на бинарной маске
     if(searchRight < zoneW - 1)
@@ -290,17 +290,7 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
         return bestCluster[bestCluster.size() / 2];
     };
 
-    // 5. Определяем правую координату X (справа налево):
-    //    основной проход (> 3 линий, т.е. >= 4), резервный для Формы 2а (>= 2 линий)
-    const int minSearchX{ std::max(0, searchRight - 650) };
-    auto foundX{ findEdgeByProfile(hSegs, searchRight, minSearchX, 2, 4) };
-    if(!foundX.has_value())
-    {
-        foundX = findEdgeByProfile(hSegs, searchRight, minSearchX, 2, 2);
-    }
-
-    // 6. Определяем нижнюю координату Y (снизу вверх, не уходя выше 350 px от низа листа):
-    //    основной проход (> 2 линий, т.е. >= 3), резервный для Формы 2а (>= 2 линий)
+    // 5. Сначала определяем нижнюю координату Y (снизу вверх, не уходя выше 350 px от низа листа)
     const int minSearchY{ std::max(0, searchBottom - 350) };
     auto foundY{ findEdgeByProfile(vSegs, searchBottom, minSearchY, 3, 3) };
     if(!foundY.has_value())
@@ -308,7 +298,35 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
         foundY = findEdgeByProfile(vSegs, searchBottom, minSearchY, 2, 2);
     }
 
-    if(!foundX.has_value() || !foundY.has_value())
+    if(!foundY.has_value())
+    {
+        return std::nullopt;
+    }
+
+    // 6. Оставляем только горизонтальные линии, лежащие по высоте внутри штампа
+    //    (отсекаем линии технических требований над штампом и нижние артефакты скана)
+    constexpr int kMaxStampBandHeightPx{ 310 };
+    constexpr int kBottomBandTolPx{ 12 };
+
+    std::vector<Segment> stampHSegs{};
+    stampHSegs.reserve(hSegs.size());
+    for(const auto& s : hSegs)
+    {
+        if(s.pos >= (*foundY - kMaxStampBandHeightPx) && s.pos <= (*foundY + kBottomBandTolPx))
+        {
+            stampHSegs.push_back(s);
+        }
+    }
+
+    // Определяем правую координату X только по линиям внутри полосы штампа
+    const int minSearchX{ std::max(0, searchRight - 650) };
+    auto foundX{ findEdgeByProfile(stampHSegs, searchRight, minSearchX, 2, 4) };
+    if(!foundX.has_value())
+    {
+        foundX = findEdgeByProfile(stampHSegs, searchRight, minSearchX, 2, 2);
+    }
+
+    if(!foundX.has_value())
     {
         return std::nullopt;
     }
