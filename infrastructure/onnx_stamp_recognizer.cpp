@@ -1163,16 +1163,19 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
     }
 
     // 2. Ищем правый нижний угол рамки штампа. Если найден — вырезаем строго от него;
-    //    если не найден — откатываемся на резервную вырезку от края изображения
-    int cropX{ std::max(0, fullW - kOffsetX - kCropW) };
-    int cropY{ std::max(0, fullH - kOffsetY - kCropH) };
+    //    если не найден — откатываемся на резервную вырезку от края изображения.
+    // Используем размеры уже нормализованного fullGray, а не исходные fullW/fullH.
+    const int scanW{ fullGray.cols };
+    const int scanH{ fullGray.rows };
+    int cropX{ std::max(0, scanW - kOffsetX - kCropW) };
+    int cropY{ std::max(0, scanH - kOffsetY - kCropH) };
 
     const auto cornerOpt{ findStampBottomRightCorner(fullGray) };
     if(cornerOpt.has_value())
     {
         // Сдвигаемся от найденного правого нижнего угла влево на ширину штампа и вверх на высоту штампа
-        cropX = std::clamp(cornerOpt->x + kCornerPadRightPx - kCropW, 0, std::max(0, fullW - kCropW));
-        cropY = std::clamp(cornerOpt->y + kCornerPadBottomPx - kCropH, 0, std::max(0, fullH - kCropH));
+        cropX = std::clamp(cornerOpt->x + kCornerPadRightPx - kCropW, 0, std::max(0, scanW - kCropW));
+        cropY = std::clamp(cornerOpt->y + kCornerPadBottomPx - kCropH, 0, std::max(0, scanH - kCropH));
     }
     else
     {
@@ -1180,8 +1183,8 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
                              << QString::fromStdString(imagePath.filename().string());
     }
 
-    const int safeW{ std::min(kCropW, fullW - cropX) };
-    const int safeH{ std::min(kCropH, fullH - cropY) };
+    const int safeW{ std::min(kCropW, scanW - cropX) };
+    const int safeH{ std::min(kCropH, scanH - cropY) };
     cv::Mat grayCrop{ fullGray(cv::Rect(cropX, cropY, safeW, safeH)).clone() };
 
     // 3. Фильтрация шума (медианный фильтр для бинарных сканов, CLAHE — для тусклых)
