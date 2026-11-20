@@ -78,170 +78,242 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
         return std::nullopt;
     }
 
-    // 1. Отрезаем по 5 мм (~25 px) справа и снизу от всего скана, чтобы отсечь чёрные поля сканера
-    constexpr int kScannerMarginPx{ 25 };
-    const int cleanW{ fullGray.cols - kScannerMarginPx };
-    const int cleanH{ fullGray.rows - kScannerMarginPx };
-    if(cleanW <= 200 || cleanH <= 200)
+    // 1. Вырезаем правую нижнюю область поиска
+    const int zoneW{ std::min(kSearchZoneWidthPx, fullGray.cols) };
+    const int zoneH{ std::min(kSearchZoneHeightPx, fullGray.rows) };
+    if(zoneW <= 200 || zoneH <= 200)
     {
         return std::nullopt;
     }
 
-    // Вырезаем правый нижний угол очищенного листа
-    const int zoneW{ std::min(kSearchZoneWidthPx, cleanW) };
-    const int zoneH{ std::min(kSearchZoneHeightPx, cleanH) };
-    const int offsetX{ cleanW - zoneW };
-    const int offsetY{ cleanH - zoneH };
+    const int offsetX{ fullGray.cols - zoneW };
+    const int offsetY{ fullGray.rows - zoneH };
     const cv::Mat zone{ fullGray(cv::Rect(offsetX, offsetY, zoneW, zoneH)) };
 
-    // 2. Гасим зернистый шум сканера медианным фильтром 3x3 и бинаризуем
-    //    (мягкий порог 190 сохраняет бледно-серые линии рамки на потёртых сканах)
+    // 2. Адаптивно определяем границы чёрных полей сканера справа и снизу
+    int searchRight{ zoneW - 1 };
+    while(searchRight > zoneW / 2)
+    {
+        const cv::Mat col{ zone.col(searchRight) };
+        const int darkPixels{ zoneH - cv::countNonZero(col > 50) };
+        if(darkPixels < static_cast<int>(zoneH * 0.85))
+        {
+            break;
+        }
+        --searchRight;
+    }
+
+    int searchBottom{ zoneH - 1 };
+    while(searchBottom > zoneH / 2)
+    {
+        const cv::Mat row{ zone.row(searchBottom) };
+        const int darkPixels{ zoneW - cv::countNonZero(row > 50) };
+        if(darkPixels < static_cast<int>(zoneW * 0.85))
+        {
+            break;
+        }
+        --searchBottom;
+    }
+
+    // 3. Шумоподавление, адаптивная бинаризация бледных линий, закрытие разрывов и разделение осей
     cv::Mat denoised{};
     cv::medianBlur(zone, denoised, 3);
 
     cv::Mat binary{};
-    cv::threshold(denoised, binary, 190, 255, cv::THRESH_BINARY_INV);
+    cv::adaptiveThreshold(denoised, binary, 255,
+                          cv::ADAPTIVE_THRESH_GAUSSIAN_C,
+                          cv::THRESH_BINARY_INV, 25, 12);
 
-    // Склеиваем мелкие разрывы в линиях и выделяем длинные ортогональные отрезки рамки
+    // Обнуляем найденные чёрные полосы сканера на бинарной маске
+    if(searchRight < zoneW - 1)
+    {
+        binary.colRange(searchRight + 1, zoneW).setTo(0);
+    }
+    if(searchBottom < zoneH - 1)
+    {
+        binary.rowRange(searchBottom + 1, zoneH).setTo(0);
+    }
+
+    constexpr int kHorizClosePx{ 35 };
+    constexpr int kVertClosePx{ 20 };
+    constexpr int kMinHorizSegPx{ 85 };
+    constexpr int kMinVertSegPx{ 32 };
+
     cv::Mat closedH{}, closedV{};
-    cv::morphologyEx(binary, closedH, cv::MORPH_CLOSE, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(55, 1)));
-    cv::morphologyEx(binary, closedV, cv::MORPH_CLOSE, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 55)));
+    cv::morphologyEx(binary, closedH, cv::MORPH_CLOSE,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kHorizClosePx, 1)));
+    cv::morphologyEx(binary, closedV, cv::MORPH_CLOSE,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, kVertClosePx)));
 
     cv::Mat horizMask{}, vertMask{};
-    cv::morphologyEx(closedH, horizMask, cv::MORPH_OPEN, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(200, 1)));
-    cv::morphologyEx(closedV, vertMask, cv::MORPH_OPEN, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 120)));
+    cv::morphologyEx(closedH, horizMask, cv::MORPH_OPEN,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kMinHorizSegPx, 1)));
+    cv::morphologyEx(closedV, vertMask, cv::MORPH_OPEN,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, kMinVertSegPx)));
 
-    // 3. Поиск правой вертикальной стенки штампа через непрерывные компоненты
-    cv::Mat vLabels{}, vStats{}, vCentroids{};
-    const int numVComps{ cv::connectedComponentsWithStats(vertMask, vLabels, vStats, vCentroids) };
-
-    constexpr int kMinContinuousVertHeightPx{ 150 };
-    const int rightSearchWidthPx{ std::min(zoneW, static_cast<int>(fullGray.cols * 0.25)) };
-    const int minVertSearchX{ std::max(0, zoneW - rightSearchWidthPx) };
-
-    struct VertLineInfo
+    // 4. Извлекаем уникальные горизонтальные и вертикальные отрезки через связные компоненты
+    struct Segment
     {
-        int centerX{ 0 };
-        int bottomY{ 0 };
+        int start{ 0 };
+        int end{ 0 };
+        int pos{ 0 };
     };
-    std::vector<VertLineInfo> validVertLines{};
 
-    for(int c{ 1 }; c < numVComps; ++c)
-    {
-        const int compLeft{ vStats.at<int>(c, cv::CC_STAT_LEFT) };
-        const int compTop{ vStats.at<int>(c, cv::CC_STAT_TOP) };
-        const int compWidth{ vStats.at<int>(c, cv::CC_STAT_WIDTH) };
-        const int compHeight{ vStats.at<int>(c, cv::CC_STAT_HEIGHT) };
-        const int centerX{ compLeft + compWidth / 2 };
-
-        if(compHeight >= kMinContinuousVertHeightPx && centerX >= minVertSearchX)
+    auto extractSegments = [](const cv::Mat& mask, bool horizontal, int minLen) -> std::vector<Segment> {
+        cv::Mat labels{}, stats{}, centroids{};
+        const int n{ cv::connectedComponentsWithStats(mask, labels, stats, centroids) };
+        std::vector<Segment> segs{};
+        segs.reserve(static_cast<size_t>(n));
+        for(int i{ 1 }; i < n; ++i)
         {
-            validVertLines.push_back({ centerX, compTop + compHeight - 1 });
-        }
-    }
-
-    // Сортируем найденные длинные вертикальные линии справа налево (по убыванию X)
-    std::sort(validVertLines.begin(), validVertLines.end(), [](const VertLineInfo& a, const VertLineInfo& b) {
-        return a.centerX > b.centerX;
-    });
-
-    int foundX{ -1 };
-    int vertBottomY{ -1 };
-    const bool hasVerticalLine{ !validVertLines.empty() };
-
-    if(hasVerticalLine)
-    {
-        foundX = validVertLines.at(0).centerX;
-        vertBottomY = validVertLines.at(0).bottomY;
-
-        // Шаг перехода 20..45 px: переходит с внешней рамки формата на стенку штампа,
-        // но не допрыгивает до внутренней перегородки столбца «Лит.»
-        if(validVertLines.size() >= 2 &&
-            (validVertLines.at(0).centerX - validVertLines.at(1).centerX) >= 20 &&
-            (validVertLines.at(0).centerX - validVertLines.at(1).centerX) <= 45)
-        {
-            foundX = validVertLines.at(1).centerX;
-            vertBottomY = validVertLines.at(1).bottomY;
-        }
-    }
-    else
-    {
-        foundX = zoneW - 1;
-        vertBottomY = zoneH - 1;
-    }
-
-    // 4. Поиск нижней горизонтальной линии снизу вверх
-    cv::Mat hLabels{}, hStats{}, hCentroids{};
-    const int numHComps{ cv::connectedComponentsWithStats(horizMask, hLabels, hStats, hCentroids) };
-
-    constexpr int kMinContinuousHorizWidthPx{ 620 };
-    const int minSearchY{ hasVerticalLine ? std::max(0, vertBottomY - 110) : (zoneH / 2) };
-
-    struct HorizLineInfo
-    {
-        int centerY{ 0 };
-        int rightX{ 0 };
-    };
-    std::vector<HorizLineInfo> validHorizLines{};
-
-    for(int c{ 1 }; c < numHComps; ++c)
-    {
-        const int compLeft{ hStats.at<int>(c, cv::CC_STAT_LEFT) };
-        const int compWidth{ hStats.at<int>(c, cv::CC_STAT_WIDTH) };
-        const int compTop{ hStats.at<int>(c, cv::CC_STAT_TOP) };
-        const int compHeight{ hStats.at<int>(c, cv::CC_STAT_HEIGHT) };
-        const int centerY{ compTop + compHeight / 2 };
-        const int compRight{ compLeft + compWidth - 1 };
-
-        if(compWidth >= kMinContinuousHorizWidthPx &&
-            centerY >= minSearchY &&
-            (!hasVerticalLine || compRight >= (foundX - 100)))
-        {
-            validHorizLines.push_back({ centerY, compRight });
-        }
-    }
-
-    std::sort(validHorizLines.begin(), validHorizLines.end(), [](const HorizLineInfo& a, const HorizLineInfo& b) {
-        return a.centerY > b.centerY;
-    });
-
-    int foundY{ -1 };
-    if(!validHorizLines.empty())
-    {
-        foundY = validHorizLines.at(0).centerY;
-        if(!hasVerticalLine)
-        {
-            // При вертикальном фоллбэке привязываемся к правому концу горизонтальной линии штампа
-            foundX = validHorizLines.at(0).rightX;
-        }
-
-        // Шаг перехода 15..58 px: перепрыгивает с внешней тонкой рамки листа на дно штампа
-        if(validHorizLines.size() >= 2 &&
-            (validHorizLines.at(0).centerY - validHorizLines.at(1).centerY) >= 15 &&
-            (validHorizLines.at(0).centerY - validHorizLines.at(1).centerY) <= 58)
-        {
-            foundY = validHorizLines.at(1).centerY;
-            if(!hasVerticalLine)
+            const int l{ stats.at<int>(i, cv::CC_STAT_LEFT) };
+            const int t{ stats.at<int>(i, cv::CC_STAT_TOP) };
+            const int w{ stats.at<int>(i, cv::CC_STAT_WIDTH) };
+            const int h{ stats.at<int>(i, cv::CC_STAT_HEIGHT) };
+            if(horizontal && w >= minLen)
             {
-                foundX = validHorizLines.at(1).rightX;
+                segs.push_back({ l, l + w - 1, t + h / 2 });
+            }
+            else if(!horizontal && h >= minLen)
+            {
+                segs.push_back({ t, t + h - 1, l + w / 2 });
             }
         }
-    }
+        return segs;
+    };
 
-    // 5. Защита для Формы 2а и оборванного дна штампа:
-    //    если горизонтальная линия не найдена или оказалась выше конца вертикали более чем на 35 px,
-    //    принимаем за низ конец вертикальной стенки
-    if(foundY < 0 || (hasVerticalLine && foundY < vertBottomY && (vertBottomY - foundY) > 35))
+    const auto hSegs{ extractSegments(horizMask, true, kMinHorizSegPx) };
+    const auto vSegs{ extractSegments(vertMask, false, kMinVertSegPx) };
+
+    // Вспомогательная функция поиска координаты по профилю пересечений и медиане плотного кластера окончаний
+    auto findEdgeByProfile = [](const std::vector<Segment>& segs,
+                                int maxCoord,
+                                int minCoord,
+                                int minJump,
+                                size_t minGroupSize,
+                                int stabilityWidth = 12,
+                                int clusterTol = 25) -> std::optional<int> {
+        if(maxCoord - minCoord <= stabilityWidth || segs.empty())
+        {
+            return std::nullopt;
+        }
+
+        // Строим профиль количества уникальных линий на каждой координате
+        std::vector<int> profile(static_cast<size_t>(maxCoord + 1), 0);
+        for(const auto& s : segs)
+        {
+            const int a{ std::clamp(s.start, 0, maxCoord) };
+            const int b{ std::clamp(s.end, 0, maxCoord) };
+            for(int c{ a }; c <= b; ++c)
+            {
+                ++profile[static_cast<size_t>(c)];
+            }
+        }
+
+        // Базовый фон у края листа (медиана первых 15 px от стартовой границы поиска)
+        std::vector<int> edgeSamples{};
+        for(int c{ maxCoord }; c > std::max(minCoord, maxCoord - 15); --c)
+        {
+            edgeSamples.push_back(profile[static_cast<size_t>(c)]);
+        }
+        std::sort(edgeSamples.begin(), edgeSamples.end());
+        const int baseline{ edgeSamples.empty() ? 0 : edgeSamples[edgeSamples.size() / 2] };
+
+        // Ищем первый устойчивый скачок при движении от края к центру
+        int stableEntry{ -1 };
+        int streak{ 0 };
+        for(int c{ maxCoord }; c >= minCoord; --c)
+        {
+            if(profile[static_cast<size_t>(c)] - baseline >= minJump)
+            {
+                ++streak;
+                if(streak >= stabilityWidth)
+                {
+                    stableEntry = c;
+                    break;
+                }
+            }
+            else
+            {
+                streak = 0;
+            }
+        }
+
+        if(stableEntry < 0)
+        {
+            return std::nullopt;
+        }
+
+        // Собираем окончания линий, пересекающих подтверждённую позицию входа
+        std::vector<int> ends{};
+        for(const auto& s : segs)
+        {
+            if(s.start <= stableEntry && s.end >= stableEntry)
+            {
+                ends.push_back(s.end);
+            }
+        }
+
+        if(ends.size() < minGroupSize)
+        {
+            return std::nullopt;
+        }
+
+        // Сортируем окончания от края к центру (по убыванию) и выбираем самый крайний плотный кластер
+        std::sort(ends.begin(), ends.end(), std::greater<int>());
+        std::vector<int> bestCluster{};
+
+        for(size_t i{ 0 }; i < ends.size(); ++i)
+        {
+            std::vector<int> cluster{};
+            for(size_t j{ i }; j < ends.size(); ++j)
+            {
+                if(ends[i] - ends[j] <= clusterTol)
+                {
+                    cluster.push_back(ends[j]);
+                }
+            }
+            if(cluster.size() >= minGroupSize)
+            {
+                bestCluster = std::move(cluster);
+                break;
+            }
+        }
+
+        if(bestCluster.size() < minGroupSize)
+        {
+            return std::nullopt;
+        }
+
+        // Возвращаем медиану выбранного кластера
+        std::sort(bestCluster.begin(), bestCluster.end());
+        return bestCluster[bestCluster.size() / 2];
+    };
+
+    // 5. Определяем правую координату X (справа налево):
+    //    основной проход (> 3 линий, т.е. >= 4), резервный для Формы 2а (>= 2 линий)
+    const int minSearchX{ std::max(0, searchRight - 650) };
+    auto foundX{ findEdgeByProfile(hSegs, searchRight, minSearchX, 2, 4) };
+    if(!foundX.has_value())
     {
-        foundY = vertBottomY;
+        foundX = findEdgeByProfile(hSegs, searchRight, minSearchX, 2, 2);
     }
 
-    if(foundY < 0)
+    // 6. Определяем нижнюю координату Y (снизу вверх, не уходя выше 350 px от низа листа):
+    //    основной проход (> 2 линий, т.е. >= 3), резервный для Формы 2а (>= 2 линий)
+    const int minSearchY{ std::max(0, searchBottom - 350) };
+    auto foundY{ findEdgeByProfile(vSegs, searchBottom, minSearchY, 3, 3) };
+    if(!foundY.has_value())
+    {
+        foundY = findEdgeByProfile(vSegs, searchBottom, minSearchY, 2, 2);
+    }
+
+    if(!foundX.has_value() || !foundY.has_value())
     {
         return std::nullopt;
     }
 
-    return cv::Point(offsetX + foundX, offsetY + foundY);
+    return cv::Point(offsetX + *foundX, offsetY + *foundY);
 }
 
 
