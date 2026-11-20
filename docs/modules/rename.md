@@ -63,3 +63,63 @@ Data001.jpg -> 123.45.67.890СБ Форма.jpg.
 .xls будет одна запись 123.45.67.890, а отсканированных файлов может быть 
 data001.jpg - 123.45.67.890 лист 1, data002.jpg - 123.45.67.890 лист 2,
 data003.jpg - 123.45.67.890СБ лист 1, data004.jpg - 123.45.67.890СБ лист 2).
+
+# ONNX-модели распознавания штампов (PaddleOCR)
+
+Для работы модуля переименования сканов (`OnnxStampRecognizer`) в этой директории должны находиться **три файла**:
+
+1. `det.onnx` — модель детекции текстовых областей (**PP-OCRv4** / DBNet) с фиксированным входом `1x3x1024x1024`.
+2. `rec.onnx` — кириллическая модель распознавания текста (**PP-OCRv5**) с фиксированным входом `1x3x48x640`.
+3. `cyrillic_dict.txt` — словарь символов для кириллической модели (517 строк, кодировка UTF-8 без BOM).
+
+---
+
+## Способ 1. Скачать готовые ONNX-модели (рекомендуемый)
+
+Готовые сконвертированные модели и словарь можно взять из репозитория сообщества с ONNX-версиями PaddleOCR (например, `monkt/paddleocr-onnx` на Hugging Face — раздел кириллических моделей `cyrillic` / `PP-OCRv5`):
+
+1. Скачайте файл детектора (`det.onnx` от `PP-OCRv4`), файл кириллического распознавателя (`rec.onnx` от `PP-OCRv5`) и файл словаря (`cyrillic_dict.txt`).
+2. Поместите их в папку `<корень_проекта>/models/`.
+
+---
+
+## Способ 2. Сконвертировать из официального PaddleOCR самостоятельно
+
+Если требуется пересобрать модели из официальных весов Baidu PaddleOCR, установите `paddlepaddle`, `paddleocr` и `paddle2onnx` (в отдельном Python-окружении) и выполните экспорт со **статической формой входного тензора** (OpenCV DNN требует фиксированные размеры `1024x1024` и `48x640`):
+
+```bash
+pip install paddlepaddle paddleocr paddle2onnx onnxsim
+
+# 1. Экспорт детектора PP-OCRv4 со статическим входом 1x3x1024x1024
+paddle2onnx --model_dir ./ch_PP-OCRv4_det_infer \
+            --model_filename inference.pdmodel \
+            --params_filename inference.pdiparams \
+            --save_file det.onnx \
+            --opset_version 11 \
+            --input_shape_dict="{'x':[1,3,1024,1024]}"
+
+# 2. Экспорт кириллического распознавателя PP-OCRv5 со статическим входом 1x3x48x640
+paddle2onnx --model_dir ./cyrillic_PP-OCRv5_rec_infer \
+            --model_filename inference.pdmodel \
+            --params_filename inference.pdiparams \
+            --save_file rec.onnx \
+            --opset_version 11 \
+            --input_shape_dict="{'x':[1,3,48,640]}"
+```
+
+---
+
+## Настройка путей при сборке проекта
+
+При запуске `core-server` путь к папке `models/` передаётся в конструктор `OnnxStampRecognizer`. По умолчанию в конфигурации отладки используется относительный путь от директории сборки (`../../../../models`).
+
+Чтобы не настраивать пути вручную после каждой пересборки на новом ПК, рекомендуется добавить в `CMakeLists.txt` цель копирования папки `models` рядом с исполняемым файлом после сборки (`POST_BUILD`):
+
+```cmake
+add_custom_command(TARGET core-server POST_BUILD
+    COMMAND \${CMAKE_COMMAND} -E copy_directory
+        "\${CMAKE_SOURCE_DIR}/models"
+        "\$<TARGET_FILE_DIR:core-server>/models"
+    COMMENT "Copying ONNX models to executable directory..."
+)
+```
