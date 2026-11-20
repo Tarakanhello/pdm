@@ -21,6 +21,8 @@
 #include "image.h"
 
 #include <QDebug>
+#include <QImage>
+#include <QImageReader>
 #include <QString>
 
 
@@ -1123,6 +1125,41 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
     else
     {
         cv::cvtColor(srcMat, fullGray, toGrayCode);
+    }
+
+    // Нормализуем плотность пикселей к 300 DPI, если исходный файл содержит метаданные DPI.
+    // Все геометрические пороги ниже заданы в пикселях и рассчитаны на эту опорную плотность.
+    // QImageReader используется только для чтения метаданных; пиксели по-прежнему загружаются
+    // существующим классом Image, чтобы не менять текущий путь декодирования/EXIF.
+    constexpr double kReferenceDpi{ 300.0 };
+    QImageReader metadataReader{ QString::fromStdString(imagePath.string()) };
+    metadataReader.setAutoTransform(true);
+    const QImage metadataImage{ metadataReader.read() };
+    if(!metadataImage.isNull() &&
+       metadataImage.dotsPerMeterX() > 0 &&
+       metadataImage.dotsPerMeterY() > 0)
+    {
+        constexpr double kMetersPerInch{ 0.0254 };
+        const double dpiX{ metadataImage.dotsPerMeterX() * kMetersPerInch };
+        const double dpiY{ metadataImage.dotsPerMeterY() * kMetersPerInch };
+        const double scaleX{ kReferenceDpi / dpiX };
+        const double scaleY{ kReferenceDpi / dpiY };
+        const int normalizedW{ std::max(1, cvRound(fullGray.cols * scaleX)) };
+        const int normalizedH{ std::max(1, cvRound(fullGray.rows * scaleY)) };
+
+        if(std::abs(scaleX - 1.0) > 0.001 || std::abs(scaleY - 1.0) > 0.001)
+        {
+            cv::resize(fullGray, fullGray, cv::Size(normalizedW, normalizedH), 0.0, 0.0,
+                       (scaleX < 1.0 || scaleY < 1.0) ? cv::INTER_AREA : cv::INTER_CUBIC);
+            qDebug().noquote() << QString("[OpenCV-DNN] Normalized scan DPI from %1x%2 to %3 DPI.")
+                                      .arg(dpiX, 0, 'f', 1)
+                                      .arg(dpiY, 0, 'f', 1)
+                                      .arg(kReferenceDpi, 0, 'f', 0);
+        }
+    }
+    else
+    {
+        qDebug().noquote() << "[OpenCV-DNN] Scan DPI metadata is unavailable; using original pixel scale.";
     }
 
     // 2. Ищем правый нижний угол рамки штампа. Если найден — вырезаем строго от него;
