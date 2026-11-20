@@ -1127,13 +1127,17 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
         cv::cvtColor(srcMat, fullGray, toGrayCode);
     }
 
-    // Нормализуем плотность пикселей к 300 DPI, если исходный файл содержит метаданные DPI.
-    // Все геометрические пороги ниже заданы в пикселях и рассчитаны на эту опорную плотность.
-    // QImageReader используется только для чтения метаданных; пиксели по-прежнему загружаются
-    // существующим классом Image, чтобы не менять текущий путь декодирования/EXIF.
+    // Сначала ищем угол на исходном изображении: алгоритм findStampBottomRightCorner
+    // откалиброван на исходных пиксельных координатах и не должен зависеть от DPI-метаданных.
+    const auto cornerOpt{ findStampBottomRightCorner(fullGray) };
+
+    // DPI влияет только на размер выбираемой области. Геометрические размеры ниже заданы
+    // для 300 DPI; на скане с большим DPI рамка выбора пропорционально расширяется,
+    // после чего вырезка приводится к фиксированному размеру для ONNX.
     constexpr double kReferenceDpi{ 300.0 };
+    double scaleX{ 1.0 };
+    double scaleY{ 1.0 };
     QImageReader metadataReader{ QString::fromStdString(imagePath.string()) };
-    metadataReader.setAutoTransform(true);
     const QImage metadataImage{ metadataReader.read() };
     if(!metadataImage.isNull() &&
        metadataImage.dotsPerMeterX() > 0 &&
@@ -1142,40 +1146,37 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
         constexpr double kMetersPerInch{ 0.0254 };
         const double dpiX{ metadataImage.dotsPerMeterX() * kMetersPerInch };
         const double dpiY{ metadataImage.dotsPerMeterY() * kMetersPerInch };
-        const double scaleX{ kReferenceDpi / dpiX };
-        const double scaleY{ kReferenceDpi / dpiY };
-        const int normalizedW{ std::max(1, cvRound(fullGray.cols * scaleX)) };
-        const int normalizedH{ std::max(1, cvRound(fullGray.rows * scaleY)) };
-
-        if(std::abs(scaleX - 1.0) > 0.001 || std::abs(scaleY - 1.0) > 0.001)
-        {
-            cv::resize(fullGray, fullGray, cv::Size(normalizedW, normalizedH), 0.0, 0.0,
-                       (scaleX < 1.0 || scaleY < 1.0) ? cv::INTER_AREA : cv::INTER_CUBIC);
-            qDebug().noquote() << QString("[OpenCV-DNN] Normalized scan DPI from %1x%2 to %3 DPI.")
-                                      .arg(dpiX, 0, 'f', 1)
-                                      .arg(dpiY, 0, 'f', 1)
-                                      .arg(kReferenceDpi, 0, 'f', 0);
-        }
+        scaleX = dpiX / kReferenceDpi;
+        scaleY = dpiY / kReferenceDpi;
+        qDebug().noquote() << QString("[OpenCV-DNN] Source DPI %1x%2; crop scale %3x%4.")
+                                  .arg(dpiX, 0, 'f', 1)
+                                  .arg(dpiY, 0, 'f', 1)
+                                  .arg(scaleX, 0, 'f', 3)
+                                  .arg(scaleY, 0, 'f', 3);
     }
     else
     {
-        qDebug().noquote() << "[OpenCV-DNN] Scan DPI metadata is unavailable; using original pixel scale.";
+        qDebug().noquote() << "[OpenCV-DNN] Scan DPI metadata is unavailable; using 300-DPI crop dimensions.";
     }
 
-    // 2. Ищем правый нижний угол рамки штампа. Если найден — вырезаем строго от него;
-    //    если не найден — откатываемся на резервную вырезку от края изображения.
-    // Используем размеры уже нормализованного fullGray, а не исходные fullW/fullH.
+    const int cropW{ std::max(1, cvRound(kCropW * scaleX)) };
+    const int cropH{ std::max(1, cvRound(kCropH * scaleY)) };
+    const int offsetX{ std::max(0, cvRound(kOffsetX * scaleX)) };
+    const int offsetY{ std::max(0, cvRound(kOffsetY * scaleY)) };
+    const int padRight{ cvRound(kCornerPadRightPx * scaleX) };
+    const int padBottom{ cvRound(kCornerPadBottomPx * scaleY) };
+
+    // 2. Формируем ROI в исходных координатах, используя найденный на исходном
+    // изображении угол. Синяя отладочная рамка показывает именно этот увеличенный ROI.
     const int scanW{ fullGray.cols };
     const int scanH{ fullGray.rows };
-    int cropX{ std::max(0, scanW - kOffsetX - kCropW) };
-    int cropY{ std::max(0, scanH - kOffsetY - kCropH) };
+    int cropX{ std::max(0, scanW - offsetX - cropW) };
+    int cropY{ std::max(0, scanH - offsetY - cropH) };
 
-    const auto cornerOpt{ findStampBottomRightCorner(fullGray) };
     if(cornerOpt.has_value())
     {
-        // Сдвигаемся от найденного правого нижнего угла влево на ширину штампа и вверх на высоту штампа
-        cropX = std::clamp(cornerOpt->x + kCornerPadRightPx - kCropW, 0, std::max(0, scanW - kCropW));
-        cropY = std::clamp(cornerOpt->y + kCornerPadBottomPx - kCropH, 0, std::max(0, scanH - kCropH));
+        cropX = std::clamp(cornerOpt->x + padRight - cropW, 0, std::max(0, scanW - cropW));
+        cropY = std::clamp(cornerOpt->y + padBottom - cropH, 0, std::max(0, scanH - cropH));
     }
     else
     {
@@ -1183,9 +1184,17 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
                              << QString::fromStdString(imagePath.filename().string());
     }
 
-    const int safeW{ std::min(kCropW, scanW - cropX) };
-    const int safeH{ std::min(kCropH, scanH - cropY) };
+    const int safeW{ std::min(cropW, scanW - cropX) };
+    const int safeH{ std::min(cropH, scanH - cropY) };
     cv::Mat grayCrop{ fullGray(cv::Rect(cropX, cropY, safeW, safeH)).clone() };
+
+    // Приводим выбранную область к эталонному размеру 300 DPI для прежних порогов
+    // фильтрации и неизменного входного масштаба последующего распознавания.
+    if(grayCrop.cols != kCropW || grayCrop.rows != kCropH)
+    {
+        cv::resize(grayCrop, grayCrop, cv::Size(kCropW, kCropH), 0.0, 0.0,
+                   (scaleX > 1.0 || scaleY > 1.0) ? cv::INTER_AREA : cv::INTER_CUBIC);
+    }
 
     // 3. Фильтрация шума (медианный фильтр для бинарных сканов, CLAHE — для тусклых)
     cv::Scalar meanVal, stdDevVal;
