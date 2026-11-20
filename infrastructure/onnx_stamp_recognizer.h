@@ -574,14 +574,16 @@ namespace pdm::infrastructure
         constexpr static int kForm12CellCropH{ 55 };                  ///< Высота прямого кропа ячейки «Лист»/«Листов» (Форма 1 и 2).
 
         // Варианты распознавания заголовка графы «Листов» (проверяются первыми, так как включают подстроку «Лист»)
-        static constexpr std::array<std::string_view, 15> kTotalSheetsKeywords{
+        static constexpr std::array<std::string_view, 18> kTotalSheetsKeywords{
             "Листов", "Листоб", "Лucmob", "Лucmoб", "Листо8", "Листо", "Лисmов",
-            "Пустоб", "ПистоВ", "Пистов", "Шucmoб", "ucino", "ucmo", "ucmm", "cmm"
+            "Пустоб", "ПистоВ", "Пистов", "Шucmoб", "ucino", "ucmo", "ucmm", "cmm",
+            "Jiucmo", "lucmob", "Лустоб"
         };
 
         // Варианты распознавания заголовка графы «Лист»
-        static constexpr std::array<std::string_view, 9> kCurrentSheetKeywords{
-            "Лист", "Лиcт", "Лucm", "llucm", "ucm", "ucт", "ucп", "Шucm", "VZUL"
+        static constexpr std::array<std::string_view, 13> kCurrentSheetKeywords{
+            "Лист", "Лиcт", "Лucm", "llucm", "ucm", "ucт", "ucп", "Шucm", "VZUL",
+            "lucm", "Jucm", "Llucm", "ЛиЕТ"
         };
 
         // Параметры разбора децимального номера по ЕСКД (формат XXX.XX.XX.XX.XXX)
@@ -644,7 +646,14 @@ namespace pdm::infrastructure
            { "ьалка", "балка" },
            { "краинии", "крайний" },
            { "краинего", "крайнего" },
-           { "палудный", "палубный" }
+           { "палудный", "палубный" },
+           { "Одшивка", "Обшивка" },
+           { "одшивка", "обшивка" },
+           { "Обйивка", "Обшивка" },
+           { "обйивка", "обшивка" },
+           { "Настия", "Настил" },
+            { "настия", "настил" },
+            { "палудный", "палубный" }
         });
     };
 

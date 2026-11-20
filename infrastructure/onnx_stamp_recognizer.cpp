@@ -449,6 +449,13 @@ std::string OnnxStampRecognizer::normalizeExecutionSuffix(std::string_view rawSu
             .toStdString();
     }
 
+    // Поддержка суффиксов вида "/1", "/2" (в имени файла Windows символ '/' заменяется на '-')
+    if (rawSuffix.size() == 2 && rawSuffix[0] == '/' &&
+        std::isdigit(static_cast<unsigned char>(rawSuffix[1])))
+    {
+        return std::string{ '_' } + rawSuffix[1];
+    }
+
     return "";
 }
 
@@ -1076,7 +1083,7 @@ bool OnnxStampRecognizer::isStopWord(const std::string& s)
     // Короткие одиночные заголовки графы «Дата» (проверяем только короткие строки, чтобы не задеть обычные слова)
     if(s.size() <= 10)
     {
-        if(s.find("Дата") != std::string::npos  ||
+        if(s.find("Дата") != std::string::npos ||
             s.find("Цата") != std::string::npos ||
             s.find("Лата") != std::string::npos ||
             s.find("Lота") != std::string::npos ||
@@ -1084,13 +1091,16 @@ bool OnnxStampRecognizer::isStopWord(const std::string& s)
             s.find("loma") != std::string::npos ||
             s.find("lomo") != std::string::npos ||
             s.find("Дoma") != std::string::npos ||
-            s == "Аит" || s == "Лит")
+            s.find("Lапо") != std::string::npos ||
+            s == "ата" || s == "Аит" || s == "Лит" || s == "та")
         {
             return true;
         }
     }
 
-    return s.find("Копиров") != std::string::npos ||
+    return s.find("чертеж") != std::string::npos ||
+           s.find("черпеж") != std::string::npos ||
+           s.find("Копиров") != std::string::npos ||
            s.find("Копироб") != std::string::npos ||
            s.find("Копиаов") != std::string::npos ||
            s.find("Конивоб") != std::string::npos ||
@@ -1499,10 +1509,30 @@ void OnnxStampRecognizer::extractProductName(const std::vector<TextBox>& boxes,
         const bool hasCyrillic{ cleanedPart.find('\xD0') != std::string::npos ||
                                cleanedPart.find('\xD1') != std::string::npos };
 
-        if(hasCyrillic && cleanedPart.size() >= kMinCleanedNameBytes && !isStopWord(cleanedPart))
+        if(!hasCyrillic || cleanedPart.size() < kMinCleanedNameBytes || isStopWord(cleanedPart))
         {
-            nameParts.emplace_back(by, std::move(cleanedPart));
+            continue;
         }
+
+        // ---> ВСТАВЛЯТЬ СЮДА <---
+        // Отсекаем короткие 2-буквенные обрывки без гласных из левой колонки (например, "мв", "пт", "кб")
+        if(cleanedPart.size() <= 4)
+        {
+            static constexpr std::array<std::string_view, 20> kCyrillicVowels{
+                "а", "е", "ё", "и", "о", "у", "ы", "э", "ю", "я",
+                "А", "Е", "Ё", "И", "О", "У", "Ы", "Э", "Ю", "Я"
+            };
+            const bool hasVowel{ std::any_of(kCyrillicVowels.begin(), kCyrillicVowels.end(),
+                                            [&cleanedPart](std::string_view v) {
+                                                return cleanedPart.find(v) != std::string::npos;
+                                            }) };
+            if(!hasVowel)
+            {
+                continue;
+            }
+        }
+
+        nameParts.emplace_back(by, std::move(cleanedPart));
     }
 
     std::sort(nameParts.begin(), nameParts.end(), [](const auto& a, const auto& b) {
