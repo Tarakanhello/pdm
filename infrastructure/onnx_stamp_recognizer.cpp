@@ -292,12 +292,15 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
         return bestCluster[bestCluster.size() / 2];
     };
 
-    // 5. Сначала определяем нижнюю координату Y (снизу вверх, не уходя выше 350 px от низа листа)
+    // 5. Сначала определяем нижнюю координату Y
+    // 5. Сначала определяем нижнюю координату Y.
+    // В нижней части Формы 1 (графа организации) всего 2 вертикальные линии рамки (левая и правая),
+    // поэтому используем minJump = 2 (с запасным minJump = 1).
     const int minSearchY{ std::max(0, searchBottom - 350) };
-    auto foundY{ findEdgeByProfile(vSegs, searchBottom, minSearchY, 3, 3) };
+    auto foundY{ findEdgeByProfile(vSegs, searchBottom, minSearchY, 2, 2) };
     if(!foundY.has_value())
     {
-        foundY = findEdgeByProfile(vSegs, searchBottom, minSearchY, 2, 2);
+        foundY = findEdgeByProfile(vSegs, searchBottom, minSearchY, 1, 2, 12, 30);
     }
 
     if(!foundY.has_value())
@@ -306,8 +309,7 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
     }
 
     // 6. Оставляем только горизонтальные линии, лежащие по высоте внутри штампа
-    //    (отсекаем линии технических требований над штампом и нижние артефакты скана)
-    constexpr int kMaxStampBandHeightPx{ 310 };
+    constexpr int kMaxStampBandHeightPx{ 340 };
     constexpr int kBottomBandTolPx{ 12 };
 
     std::vector<Segment> stampHSegs{};
@@ -320,15 +322,87 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
         }
     }
 
-    // Определяем правую координату X только по линиям внутри полосы штампа
-    const int minSearchX{ std::max(0, searchRight - 650) };
-    auto foundX{ findEdgeByProfile(stampHSegs, searchRight, minSearchX, 2, 4) };
+    // Определяем правую координату X по горизонтальным линиям внутри полосы штампа
+    const int minSearchX{ std::max(0, searchRight - 900) };
+    auto foundX{ findEdgeByProfile(stampHSegs, searchRight, minSearchX, 2, 3) };
     if(!foundX.has_value())
     {
         foundX = findEdgeByProfile(stampHSegs, searchRight, minSearchX, 2, 2);
     }
-
     if(!foundX.has_value())
+    {
+        foundX = findEdgeByProfile(stampHSegs, searchRight, minSearchX, 1, 2, 12, 30);
+    }
+
+    // Запасной поиск напрямую по длинным отрезкам штампа, если профильный поиск не сработал
+    if(!foundY.has_value() || !foundX.has_value())
+    {
+        // 1. Собираем все горизонтальные отрезки длиннее 100 px
+        std::vector<Segment> longH{};
+        for(const auto& s : hSegs)
+        {
+            if((s.end - s.start) >= 100 && s.pos <= searchBottom - 5)
+            {
+                longH.push_back(s);
+            }
+        }
+
+        // 2. Ищем самый правый кластер из >= 2 горизонтальных линий, заканчивающихся на одной вертикали (±25 px)
+        if(!foundX.has_value() && !longH.empty())
+        {
+            std::sort(longH.begin(), longH.end(), [](const Segment& a, const Segment& b) {
+                return a.end > b.end;
+            });
+
+            for(size_t i{ 0 }; i < longH.size(); ++i)
+            {
+                std::vector<int> clusterX{};
+                for(size_t j{ i }; j < longH.size(); ++j)
+                {
+                    if(longH[i].end - longH[j].end <= 25)
+                    {
+                        clusterX.push_back(longH[j].end);
+                    }
+                }
+                if(clusterX.size() >= 2)
+                {
+                    std::sort(clusterX.begin(), clusterX.end());
+                    foundX = clusterX[clusterX.size() / 2];
+                    break;
+                }
+            }
+        }
+
+        // 3. Зная foundX, ищем нижнюю границу foundY по вертикальным линиям вблизи foundX (±30 px)
+        //    или по самой нижней горизонтальной линии из этого кластера
+        if(foundX.has_value() && !foundY.has_value())
+        {
+            int maxVertEndY{ -1 };
+            for(const auto& v : vSegs)
+            {
+                if(std::abs(v.pos - *foundX) <= 30 && v.end <= searchBottom - 5)
+                {
+                    maxVertEndY = std::max(maxVertEndY, v.end);
+                }
+            }
+
+            int maxHorizPosY{ -1 };
+            for(const auto& h : longH)
+            {
+                if(std::abs(h.end - *foundX) <= 25)
+                {
+                    maxHorizPosY = std::max(maxHorizPosY, h.pos);
+                }
+            }
+
+            if(maxVertEndY > 0 || maxHorizPosY > 0)
+            {
+                foundY = std::max(maxVertEndY, maxHorizPosY);
+            }
+        }
+    }
+
+    if(!foundX.has_value() || !foundY.has_value())
     {
         return std::nullopt;
     }
@@ -642,7 +716,22 @@ std::string OnnxStampRecognizer::cleanRussianName(std::string s)
         replaceAll(s, typo, fixed);
     }
 
-    trimInPlace(s, ".,- ");
+    trimInPlace(s, ".,- |\\/");
+
+    // Отсекаем прилипший к вертикальной линии рамки артефакт ('0', '1') в конце кириллического слова
+    while (s.size() > 4 && (s.back() == '0' || s.back() == '1'))
+    {
+        const unsigned char prevByte{ static_cast<unsigned char>(s[s.size() - 2]) };
+        // В UTF-8 второй байт кириллической буквы всегда в диапазоне [0x80..0xBF]
+        if (prevByte >= 0x80 && prevByte <= 0xBF)
+        {
+            s.pop_back();
+        }
+        else
+        {
+            break;
+        }
+    }
 
     return s;
 }
@@ -820,6 +909,11 @@ OnnxStampRecognizer::ParsedNumberInfo OnnxStampRecognizer::parseDecimalAndCode(c
     // 2. Извлекаем код документа (СБ, ТУ) из конца хвоста
     info.code = extractTrailingDocCode(tail);
     trimInPlace(tail, " ");
+    const size_t spacePos{ tail.find(' ') };
+    if(spacePos != std::string::npos)
+    {
+        tail.erase(spacePos);
+    }
 
     // 3. Нормализуем литеру исполнения (любую кириллическую букву или латинский двойник)
     const std::string suffix{ normalizeExecutionSuffix(tail) };
@@ -979,8 +1073,26 @@ int OnnxStampRecognizer::parseSheetNumber(const std::string& raw, bool isForm2aC
 
 bool OnnxStampRecognizer::isStopWord(const std::string& s)
 {
+    // Короткие одиночные заголовки графы «Дата» (проверяем только короткие строки, чтобы не задеть обычные слова)
+    if(s.size() <= 10)
+    {
+        if(s.find("Дата") != std::string::npos  ||
+            s.find("Цата") != std::string::npos ||
+            s.find("Лата") != std::string::npos ||
+            s.find("Lота") != std::string::npos ||
+            s.find("Dота") != std::string::npos ||
+            s.find("loma") != std::string::npos ||
+            s.find("lomo") != std::string::npos ||
+            s.find("Дoma") != std::string::npos ||
+            s == "Аит" || s == "Лит")
+        {
+            return true;
+        }
+    }
+
     return s.find("Копиров") != std::string::npos ||
            s.find("Копироб") != std::string::npos ||
+           s.find("Копиаов") != std::string::npos ||
            s.find("Конивоб") != std::string::npos ||
            s.find("Формат") != std::string::npos  ||
            s.find("Фопмот") != std::string::npos  ||
@@ -989,12 +1101,7 @@ bool OnnxStampRecognizer::isStopWord(const std::string& s)
            s.find("чертеж") != std::string::npos  ||
            s.find("ГОСТ") != std::string::npos    ||
            s.find("Масса") != std::string::npos   ||
-           s.find("Масштаб") != std::string::npos ||
-           s.find("Дата") != std::string::npos    ||
-           s.find("Цата") != std::string::npos    ||
-           s.find("loma") != std::string::npos    ||
-           s.find("lomo") != std::string::npos    ||
-           s.find("Дoma") != std::string::npos;
+           s.find("Масштаб") != std::string::npos;
 }
 
 
@@ -1097,9 +1204,8 @@ OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
 
 
 
-cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imagePath)
+OnnxStampRecognizer::PreparedStamp OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imagePath)
 {
-    // 1. Загружаем полный скан и переводим его в одноканальный серый формат OpenCV
     Image img{ imagePath };
     const int fullW{ img.width() };
     const int fullH{ img.height() };
@@ -1127,13 +1233,8 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
         cv::cvtColor(srcMat, fullGray, toGrayCode);
     }
 
-    // Сначала ищем угол на исходном изображении: алгоритм findStampBottomRightCorner
-    // откалиброван на исходных пиксельных координатах и не должен зависеть от DPI-метаданных.
     const auto cornerOpt{ findStampBottomRightCorner(fullGray) };
 
-    // DPI влияет только на размер выбираемой области. Геометрические размеры ниже заданы
-    // для 300 DPI; на скане с большим DPI рамка выбора пропорционально расширяется,
-    // после чего вырезка приводится к фиксированному размеру для ONNX.
     constexpr double kReferenceDpi{ 300.0 };
     double scaleX{ 1.0 };
     double scaleY{ 1.0 };
@@ -1148,19 +1249,8 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
         const double dpiY{ metadataImage.dotsPerMeterY() * kMetersPerInch };
         scaleX = dpiX / kReferenceDpi;
         scaleY = dpiY / kReferenceDpi;
-        qDebug().noquote() << QString("[OpenCV-DNN] Source DPI %1x%2; crop scale %3x%4.")
-                                  .arg(dpiX, 0, 'f', 1)
-                                  .arg(dpiY, 0, 'f', 1)
-                                  .arg(scaleX, 0, 'f', 3)
-                                  .arg(scaleY, 0, 'f', 3);
-    }
-    else
-    {
-        qDebug().noquote() << "[OpenCV-DNN] Scan DPI metadata is unavailable; using 300-DPI crop dimensions.";
     }
 
-    // На 300 DPI область должна быть примерно на 20% шире и выше прежней,
-    // расширяясь от найденного нижнего правого угла влево и вверх.
     constexpr double kCropExpansion{ 1.3 };
     const int cropW{ std::max(1, cvRound(kCropW * scaleX * kCropExpansion)) };
     const int cropH{ std::max(1, cvRound(kCropH * scaleY * kCropExpansion)) };
@@ -1169,15 +1259,15 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
     const int padRight{ cvRound(kCornerPadRightPx * scaleX) };
     const int padBottom{ cvRound(kCornerPadBottomPx * scaleY) };
 
-    // 2. Формируем ROI в исходных координатах, используя найденный на исходном
-    // изображении угол. Синяя отладочная рамка показывает именно этот увеличенный ROI.
     const int scanW{ fullGray.cols };
     const int scanH{ fullGray.rows };
     int cropX{ std::max(0, scanW - offsetX - cropW) };
     int cropY{ std::max(0, scanH - offsetY - cropH) };
 
+    cv::Point rawCorner{ scanW - offsetX - padRight, scanH - offsetY - padBottom };
     if(cornerOpt.has_value())
     {
+        rawCorner = *cornerOpt;
         cropX = std::clamp(cornerOpt->x + padRight - cropW, 0, std::max(0, scanW - cropW));
         cropY = std::clamp(cornerOpt->y + padBottom - cropH, 0, std::max(0, scanH - cropH));
     }
@@ -1191,15 +1281,20 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
     const int safeH{ std::min(cropH, scanH - cropY) };
     cv::Mat grayCrop{ fullGray(cv::Rect(cropX, cropY, safeW, safeH)).clone() };
 
-    // Приводим выбранную область к эталонному размеру 300 DPI для прежних порогов
-    // фильтрации и неизменного входного масштаба последующего распознавания.
+    // Переводим координаты правого нижнего угла рамки из полного скана в нормализованный кроп (kCropW x kCropH)
+    const float normScaleX{ static_cast<float>(kCropW) / static_cast<float>(std::max(1, safeW)) };
+    const float normScaleY{ static_cast<float>(kCropH) / static_cast<float>(std::max(1, safeH)) };
+    const cv::Point2f cornerInCrop{
+        std::clamp((rawCorner.x - cropX) * normScaleX, 0.0f, static_cast<float>(kCropW - 1)),
+        std::clamp((rawCorner.y - cropY) * normScaleY, 0.0f, static_cast<float>(kCropH - 1))
+    };
+
     if(grayCrop.cols != kCropW || grayCrop.rows != kCropH)
     {
         cv::resize(grayCrop, grayCrop, cv::Size(kCropW, kCropH), 0.0, 0.0,
                    (scaleX > 1.0 || scaleY > 1.0) ? cv::INTER_AREA : cv::INTER_CUBIC);
     }
 
-    // 3. Фильтрация шума (медианный фильтр для бинарных сканов, CLAHE — для тусклых)
     cv::Scalar meanVal, stdDevVal;
     cv::meanStdDev(grayCrop, meanVal, stdDevVal);
 
@@ -1217,26 +1312,20 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
     cv::Mat bgrMat{};
     cv::cvtColor(processed, bgrMat, cv::COLOR_GRAY2BGR);
 
-    // 4. Отладочный вывод в файл: рисуем зелёное перекрестие в найденном углу штампа
     if(!m_debugDir.empty())
     {
         cv::Mat fullDebugVis{};
         cv::cvtColor(fullGray, fullDebugVis, cv::COLOR_GRAY2BGR);
-
-        // Рисуем синюю рамку области, которая будет вырезана для распознавания
         cv::rectangle(fullDebugVis, cv::Rect(cropX, cropY, safeW, safeH), cv::Scalar(255, 0, 0), 3);
-
-        // Рисуем крупный зелёный крест в найденной точке (толщина 6 px, размер 80 px, чтобы было видно на большом листе)
         if(cornerOpt.has_value())
         {
             cv::drawMarker(fullDebugVis, *cornerOpt, cv::Scalar(0, 200, 0), cv::MARKER_CROSS, 80, 6);
         }
-
         const auto outPath{ m_debugDir / ("debug_full_" + imagePath.filename().string()) };
         cv::imwrite(outPath.string(), fullDebugVis);
     }
 
-    return bgrMat;
+    return PreparedStamp{ std::move(bgrMat), cornerInCrop };
 }
 
 
@@ -1306,13 +1395,17 @@ void OnnxStampRecognizer::recognizeTextBoxes(const cv::Mat& bgrMat, std::vector<
 
 std::optional<cv::Point2f> OnnxStampRecognizer::
     locateDecimalNumber(const std::vector<TextBox>& boxes,
+                        const cv::Point2f& corner,
                         shared::Document& doc)
 {
     cv::Point2f numPos{ 0.0f, kUnsetCoord };
 
-    // Проходим по всем текстовым блокам и ищем децимальный номер.
-    // Если в кадре два номера (верхний — случайный захват,
-    // нижний — основная надпись), оставляем самый нижний (с наибольшей координатой Y).
+    // Децимальный номер лежит внутри рамки штампа, левее правой ячейки «Лист» (10 мм)
+    const float minY{ corner.y - kStampMaxHeightPx };
+    const float maxY{ corner.y - kStampBottomEdgeTolPx };
+    const float minX{ corner.x - kStampTotalWidthPx };
+    const float maxX{ corner.x - kForm2aRightColWidthPx };
+
     for(const auto& tb : boxes)
     {
         if(tb.text.empty())
@@ -1320,16 +1413,18 @@ std::optional<cv::Point2f> OnnxStampRecognizer::
             continue;
         }
 
-        const auto parsedNum{ parseDecimalAndCode(tb.text) };
-        if(!parsedNum.number.empty())
+        const cv::Point2f& topLeft{ tb.box.front() };
+        if(topLeft.x < minX || topLeft.x > maxX || topLeft.y < minY || topLeft.y > maxY)
         {
-            const cv::Point2f& topLeft{ tb.box.front() };
-            if(topLeft.y > numPos.y)
-            {
-                doc.number = parsedNum.number;
-                doc.code = parsedNum.code;
-                numPos = topLeft;
-            }
+            continue;
+        }
+
+        const auto parsedNum{ parseDecimalAndCode(tb.text) };
+        if(!parsedNum.number.empty() && topLeft.y > numPos.y)
+        {
+            doc.number = parsedNum.number;
+            doc.code = parsedNum.code;
+            numPos = topLeft;
         }
     }
 
@@ -1345,18 +1440,43 @@ std::optional<cv::Point2f> OnnxStampRecognizer::
 
 
 
+OnnxStampRecognizer::StampFormType OnnxStampRecognizer::detectStampForm(float numY, float cornerY)
+{
+    const float distFromBottom{ cornerY - numY };
+    if(distFromBottom <= kForm2aMaxDistFromBottomPx)
+    {
+        return StampFormType::Form2a;
+    }
+    if(distFromBottom <= kForm2MaxDistFromBottomPx)
+    {
+        return StampFormType::Form2;
+    }
+    return StampFormType::Form1;
+}
+
+
+
+
 void OnnxStampRecognizer::extractProductName(const std::vector<TextBox>& boxes,
                                              const cv::Point2f& numPos,
+                                             const cv::Point2f& corner,
+                                             StampFormType formType,
                                              shared::Document& doc)
 {
-    // На узком штампе последующих листов (Форма 2а, высотой 15 мм) номер прижат к нижнему краю кропа
-    // (numPos.y > 330 px), а графа наименования по ГОСТ 2.104 отсутствует
-    if(numPos.y > kMaxForm1NumberY)
+    // На Форме 2а графа наименования по ГОСТ 2.104 отсутствует
+    if(formType == StampFormType::Form2a)
     {
         return;
     }
 
-    // 1. Собираем все подходящие строки из графы наименования строго под децимальным номером
+    // Графа наименования ограничена слева рамкой штампа (corner.x - 185 мм),
+    // справа — колонкой Лит/Масса/Масштаб (corner.x - 65 мм),
+    // сверху — строкой децимального номера, снизу — нижней линией рамки (corner.y)
+    const float minX{ numPos.x - kNameLeftFromNumPx };
+    const float maxX{ corner.x - kStampRightColsWidthPx };
+    const float minY{ numPos.y + kNameSearchTopOffsetPx };
+    const float maxY{ std::min(numPos.y + kNameMaxHeightFromNumPx, corner.y - kStampBottomEdgeTolPx) };
+
     std::vector<std::pair<float, std::string>> nameParts{};
     for(const auto& tb : boxes)
     {
@@ -1368,20 +1488,14 @@ void OnnxStampRecognizer::extractProductName(const std::vector<TextBox>& boxes,
         {
             continue;
         }
-        if(bx < numPos.x - kNameSearchLeftMarginPx || bx > numPos.x + kNameSearchRightMarginPx)
-        {
-            continue;
-        }
-        if(by <= numPos.y + kNameSearchTopOffsetPx || by > numPos.y + kNameSearchBottomOffsetPx)
+        if(bx < minX || bx > maxX || by <= minY || by >= maxY)
         {
             continue;
         }
 
-        // Очищаем строку от латинских двойников ("Wum" -> "Щит") и попутно проверяем код документа ("Сборочный чертеж")
         std::string cleanedPart{ cleanRussianName(line) };
         detectDocumentCode(cleanedPart, doc.code);
 
-        // Проверяем наличие кириллических символов в UTF-8 (старшие байты 0xD0 или 0xD1) и фильтруем стоп-слова
         const bool hasCyrillic{ cleanedPart.find('\xD0') != std::string::npos ||
                                cleanedPart.find('\xD1') != std::string::npos };
 
@@ -1391,7 +1505,6 @@ void OnnxStampRecognizer::extractProductName(const std::vector<TextBox>& boxes,
         }
     }
 
-    // 2. Упорядочиваем строки названия сверху вниз по координате Y и объединяем через пробел
     std::sort(nameParts.begin(), nameParts.end(), [](const auto& a, const auto& b) {
         return a.first < b.first;
     });
@@ -1614,108 +1727,100 @@ void OnnxStampRecognizer::findSheetValuesInBoxes(const std::vector<TextBox>& box
 
 void OnnxStampRecognizer::extractSheetNumbers(const cv::Mat& bgrMat,
                                               const std::vector<TextBox>& boxes,
-                                              const cv::Point2f& numPos,
-                                              bool isForm2a,
+                                              const cv::Point2f& corner,
+                                              StampFormType formType,
                                               shared::Document& doc)
 {
     constexpr int kDefaultSheetNumber{ 1 };
+    const bool isForm2a{ formType == StampFormType::Form2a };
 
     cv::Point2f sheetHeaderPos{ kUnsetCoord, kUnsetCoord };
     cv::Point2f totalHeaderPos{ kUnsetCoord, kUnsetCoord };
 
-    // На Форме 1 (когда есть наименование, !isForm2a) текущий лист по ГОСТ 2.104 всегда равен 1
+    // На Форме 1 и 2 (первый лист) текущий лист по ГОСТ 2.104 всегда равен 1
     bool sheetFound{ !isForm2a };
     bool totalFound{ false };
 
-    // 1. Находим заголовки «Лист» и «Листов» и проверяем слитные с ними цифры
-    findSheetHeaders(boxes, numPos, sheetHeaderPos, totalHeaderPos, sheetFound, totalFound, doc);
+    // 1. Ищем заголовки «Лист» и «Листов» строго в правой колонке штампа от corner
+    const cv::Point2f stampTopLeft{ corner.x - kStampRightColsWidthPx, corner.y - kStampMaxHeightPx };
+    findSheetHeaders(boxes, stampTopLeft, sheetHeaderPos, totalHeaderPos, sheetFound, totalFound, doc);
 
-    // 2. Ищем значения в соседних распознанных боксах:
-    //    - СНИЗУ от заголовка (Форма 2: спецификации, ведомости, текстовые документы)
-    //    - СПРАВА от заголовка в той же строке (Форма 1: чертежи деталей и сборочные чертежи)
+    // 2. Ищем значения в соседних боксах (снизу для Формы 2/2а или справа для Формы 1)
     findSheetValuesInBoxes(boxes, sheetHeaderPos, totalHeaderPos, isForm2a, sheetFound, totalFound, doc);
 
-    // 3. Прямой дораспознаватель ячеек через m_recNet, если детектор DBNet пропустил одиночную цифру
-    if (!sheetFound && sheetHeaderPos.x > 0.0f)
+    // 3. Прямой дораспознаватель ячеек через m_recNet по координатам относительно corner
+    if(!sheetFound)
     {
-        const cv::Rect rightRoi{ static_cast<int>(sheetHeaderPos.x) + kDirectSheetRightShiftX,
-                                static_cast<int>(sheetHeaderPos.y) - kDirectRightTopPadY,
-                                kDirectRightCropW, kDirectRightCropH };
-        int val{ recognizeRegionNumber(bgrMat, rightRoi, kMinValidCropSizePx, isForm2a) };
-
-        if (val <= 0 || val >= kMaxReasonableSheetNumber)
+        if(isForm2a)
         {
-            const cv::Rect belowRoi{ static_cast<int>(sheetHeaderPos.x) - kDirectBelowLeftPadX,
-                                    static_cast<int>(sheetHeaderPos.y) + kDirectBelowShiftY,
-                                    kDirectBelowCropW, kDirectBelowCropH };
-            val = recognizeRegionNumber(bgrMat, belowRoi, kMinValidCropSizePx, isForm2a);
+            // На Форме 2а ячейка номера листа всегда в самом правом нижнем углу рамки (ширина 10 мм)
+            const cv::Rect cornerRoi{
+                static_cast<int>(corner.x) - kForm2aSheetCellOffsetX,
+                static_cast<int>(corner.y) - kForm2aSheetCellOffsetY,
+                kForm2aSheetCellW,
+                kForm2aSheetCellH
+            };
+            const int val{ recognizeRegionNumber(bgrMat, cornerRoi, kMinForm2aCropSizePx, true) };
+            if(val > kDefaultSheetNumber && val < kMaxReasonableSheetNumber)
+            {
+                doc.sheet = val;
+                sheetFound = true;
+            }
         }
-
-        if (val > 0 && val < kMaxReasonableSheetNumber)
+        else if(sheetHeaderPos.x > 0.0f)
         {
-            doc.sheet = val;
+            const cv::Rect belowRoi{
+                static_cast<int>(sheetHeaderPos.x) - kDirectBelowLeftPadX,
+                static_cast<int>(sheetHeaderPos.y) + kDirectBelowShiftY,
+                kDirectBelowCropW,
+                kDirectBelowCropH
+            };
+            const int val{ recognizeRegionNumber(bgrMat, belowRoi, kMinValidCropSizePx, false) };
+            if(val > 0 && val < kMaxReasonableSheetNumber)
+            {
+                doc.sheet = val;
+                sheetFound = true;
+            }
         }
     }
 
-    // Для «Листов» проверяем область справа (Форма 1) и область снизу (Форма 2 — спецификации)
-    if (!totalFound && totalHeaderPos.x > 0.0f)
+    if(!totalFound && !isForm2a)
     {
-        const cv::Rect rightRoi{ static_cast<int>(totalHeaderPos.x) + kDirectTotalRightShiftX,
-                                static_cast<int>(totalHeaderPos.y) - kDirectRightTopPadY,
-                                kDirectRightCropW, kDirectRightCropH };
-        int val{ recognizeRegionNumber(bgrMat, rightRoi, kMinValidCropSizePx, false) };
-
-        if (val <= 0 || val >= kMaxReasonableTotalSheets)
+        int val{ 0 };
+        if(formType == StampFormType::Form1 && totalHeaderPos.x > 0.0f)
         {
-            // На Форме 2 (спецификациях) цифра общего количества листов стоит строго под заголовком «Листов»
-            const cv::Rect belowRoi{ static_cast<int>(totalHeaderPos.x) - kDirectBelowLeftPadX,
-                                    static_cast<int>(totalHeaderPos.y) + kDirectBelowShiftY,
-                                    kDirectBelowCropW, kDirectBelowCropH };
-            val = recognizeRegionNumber(bgrMat, belowRoi, kMinValidCropSizePx, false);
+            // На Форме 1 цифра общего количества листов стоит справа от слова «Листов»
+            const cv::Rect rightRoi{
+                static_cast<int>(totalHeaderPos.x) + kDirectTotalRightShiftX,
+                static_cast<int>(totalHeaderPos.y) - kDirectRightTopPadY,
+                kDirectRightCropW + 25,
+                kDirectRightCropH + 10
+            };
+            val = recognizeRegionNumber(bgrMat, rightRoi, kMinValidCropSizePx, false);
         }
 
-        if (val > 0 && val < kMaxReasonableTotalSheets)
+        if(val <= 0 || val >= kMaxReasonableTotalSheets)
+        {
+            // На Форме 2 (спецификации) или если заголовок не найден — берём ячейку снизу
+            const int totalCellX{ (totalHeaderPos.x > 0.0f)
+                                     ? (static_cast<int>(totalHeaderPos.x) - kDirectBelowLeftPadX)
+                                     : (static_cast<int>(corner.x) - kForm12TotalCellOffsetX) };
+            const int totalCellY{ (totalHeaderPos.y > 0.0f)
+                                     ? (static_cast<int>(totalHeaderPos.y) + kDirectBelowShiftY)
+                                     : (static_cast<int>(corner.y) - kForm2TotalCellOffsetY) };
+
+            const cv::Rect totalRoi{ totalCellX, totalCellY, kForm12CellCropW, kForm12CellCropH };
+            val = recognizeRegionNumber(bgrMat, totalRoi, kMinValidCropSizePx, true);
+        }
+
+        if(val > 0 && val < kMaxReasonableTotalSheets)
         {
             doc.totalSheets = val;
             totalFound = true;
         }
     }
 
-    // 4. Поиск номера листа на Форме 2а (когда заголовок «Лист» не найден)
-    if (isForm2a && sheetHeaderPos.x < 0.0f && doc.sheet == kDefaultSheetNumber)
-    {
-        // 4а. Сначала ищем среди уже найденных детектором текстовых боксов в правом нижнем углу (как на Data008)
-        for (const auto& tb : boxes)
-        {
-            const float bx{ tb.box.front().x };
-            const float by{ tb.box.front().y };
-            if (bx > numPos.x + kForm2aCellMinFromNumX && by >= numPos.y - 20.0f)
-            {
-                const int val{ parseSheetNumber(tb.text, true) };
-                if (val > kDefaultSheetNumber && val < kMaxReasonableSheetNumber)
-                {
-                    doc.sheet = val;
-                    break;
-                }
-            }
-        }
-
-        // 4б. Если детектор пропустил цифру — делаем прямой кроп ячейки в правом углу
-        if (doc.sheet == kDefaultSheetNumber)
-        {
-            const int cellX{ std::max(static_cast<int>(numPos.x + kForm2aCellMinFromNumX),
-                                     bgrMat.cols - kForm2aRightEdgeMarginX) };
-            const cv::Rect cornerRoi{ cellX, static_cast<int>(numPos.y) + kForm2aCellShiftY,
-                                     kForm2aCellCropW, kForm2aCellCropH };
-            const int val{ recognizeRegionNumber(bgrMat, cornerRoi, kMinForm2aCropSizePx, true) };
-            if (val > kDefaultSheetNumber && val < kMaxReasonableSheetNumber)
-            {
-                doc.sheet = val;
-            }
-        }
-    }
-
-    if (isForm2a && doc.sheet == kDefaultSheetNumber)
+    if(isForm2a && !sheetFound)
     {
         doc.sheet = kMinFallbackForm2aSheet;
     }
@@ -1737,56 +1842,44 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
         qDebug().noquote() << "[OpenCV-DNN] 1. Start recognizing:"
                            << QString::fromStdString(imagePath.string());
 
-        // 1. Загружаем скан, вырезаем правый нижний угол (область штампа) и переводим в BGR для OpenCV
-        cv::Mat bgrMat{ prepareStampImage(imagePath) };
-        if(bgrMat.empty())
+        const auto prepared{ prepareStampImage(imagePath) };
+        if(prepared.bgrMat.empty())
         {
             return std::nullopt;
         }
-/*
-        if(!m_debugDir.empty())
-        {
-            return std::nullopt;
-        }
-*/
 
-        // 2. Находим координаты всех текстовых блоков в области штампа
-        auto boxes{ detectTextBoxes(bgrMat) };
+        auto boxes{ detectTextBoxes(prepared.bgrMat) };
         if(boxes.empty())
         {
             return std::nullopt;
         }
 
-        // 3. Распознаем текстовые поля
-        recognizeTextBoxes(bgrMat, boxes);
+        recognizeTextBoxes(prepared.bgrMat, boxes);
 
-        // Основной документ
         shared::Document doc{};
         doc.sheet = 1;
         doc.totalSheets = 1;
 
-        // 4.  Извлекаем децимальный номер, наименование и нумерацию листов по ГОСТ 2.104
-        const auto numPos{ locateDecimalNumber(boxes, doc) };
+        const auto numPos{ locateDecimalNumber(boxes, prepared.bottomRightCorner, doc) };
         if(!numPos.has_value())
         {
             return std::nullopt;
         }
 
-        // Собираем многострочное наименование (только если номер не у самого низа кропа, т.е. это не Форма 2а)
-        extractProductName(boxes, *numPos, doc);
-        const bool isForm2a{ doc.name.empty() };
+        const StampFormType formType{ detectStampForm(numPos->y, prepared.bottomRightCorner.y) };
 
-        // Извлекаем номер страницы
-        extractSheetNumbers(bgrMat, boxes, *numPos, isForm2a, doc);
+        extractProductName(boxes, *numPos, prepared.bottomRightCorner, formType, doc);
+        extractSheetNumbers(prepared.bgrMat, boxes, prepared.bottomRightCorner, formType, doc);
 
         qDebug().noquote()
-            << QString("[OpenCV-DNN] PARSED -> Number: [%1] | Name: [%2] | Sheet: %3/%4")
+            << QString("[OpenCV-DNN] PARSED -> Form: %1 | Number: [%2] | Name: [%3] | Sheet: %4/%5")
+                   .arg(static_cast<int>(formType))
                    .arg(QString::fromStdString(doc.number))
                    .arg(QString::fromStdString(doc.name))
                    .arg(doc.sheet)
                    .arg(doc.totalSheets);
 
-        if(doc.number.empty() || (doc.sheet == 1 && doc.name.empty()))
+        if(doc.number.empty() || (formType != StampFormType::Form2a && doc.name.empty()))
         {
             qWarning().noquote() << "OnnxStampRecognizer::recognize: Failed to parse text.";
             return std::nullopt;
@@ -1794,7 +1887,7 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
 
         return doc;
     }
-    catch (const std::exception& e)
+    catch(const std::exception& e)
     {
         std::cerr << "OnnxStampRecognizer::recognize: Error: " << e.what() << "\n" << std::flush;
         return std::nullopt;

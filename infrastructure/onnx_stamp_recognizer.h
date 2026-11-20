@@ -76,6 +76,25 @@ namespace pdm::infrastructure
         };
 
         /**
+         * @brief Тип формы основной надписи по ГОСТ 2.104.
+         */
+        enum class StampFormType
+        {
+            Form1,  ///< Чертежи и схемы (высота 55 мм, номер в верхней строке).
+            Form2,  ///< Первый лист спецификации и текстовых документов (высота 40 мм).
+            Form2a  ///< Последующие листы чертежей и текстовых документов (высота 15 мм, без наименования).
+        };
+
+        /**
+         * @brief Подготовленное изображение штампа и координаты его правого нижнего угла в пространстве кропа.
+         */
+        struct PreparedStamp
+        {
+            cv::Mat bgrMat;                 ///< Нормализованный кроп штампа (1150x650, BGR).
+            cv::Point2f bottomRightCorner;  ///< Координаты правого нижнего угла рамки внутри bgrMat.
+        };
+
+        /**
          * @brief Расширяет контур текстового блока наружу для компенсации сжатия при обучении DBNet.
          * @param box Исходные координаты вершин полигона.
          * @param unclipRatio Коэффициент расширения контура.
@@ -177,7 +196,7 @@ namespace pdm::infrastructure
          * @param imagePath Путь к файлу изображения.
          * @return 3-канальная матрица `cv::Mat` (формат `CV_8UC3`, BGR) или пустая матрица при ошибке данных.
          */
-        cv::Mat prepareStampImage(const std::filesystem::path& imagePath);
+        PreparedStamp prepareStampImage(const std::filesystem::path& imagePath);
 
         /**
          * @brief Запускает нейросеть-детектор (DBNet) на подготовленном штампе и возвращает координаты текстовых блоков.
@@ -238,7 +257,10 @@ namespace pdm::infrastructure
          * @return Координаты левого верхнего угла блока номера (`cv::Point2f`) или `std::nullopt`, если номер не найден.
          */
         static std::optional<cv::Point2f> locateDecimalNumber(const std::vector<TextBox>& boxes,
+                                                              const cv::Point2f& corner,
                                                               shared::Document& doc);
+
+        static StampFormType detectStampForm(float numY, float cornerY);
 
         /**
          * @brief Извлекает и склеивает многострочное наименование изделия под децимальным номером.
@@ -252,6 +274,8 @@ namespace pdm::infrastructure
          */
         static void extractProductName(const std::vector<TextBox>& boxes,
                                        const cv::Point2f& numPos,
+                                       const cv::Point2f& corner,
+                                       StampFormType formType,
                                        shared::Document& doc);
 
         /**
@@ -285,8 +309,8 @@ namespace pdm::infrastructure
          */
         void extractSheetNumbers(const cv::Mat& bgrMat,
                                  const std::vector<TextBox>& boxes,
-                                 const cv::Point2f& numPos,
-                                 bool isForm2a,
+                                 const cv::Point2f& corner,
+                                 StampFormType formType,
                                  shared::Document& doc);
 
         /**
@@ -489,7 +513,7 @@ namespace pdm::infrastructure
         // Геометрические пороги поиска цифр в соседних боксах относительно заголовков «Лист» и «Листов»
         constexpr static float kCellBelowMaxOffsetX{ 60.0f };          ///< Макс. смещение по X при поиске цифры СНИЗУ (Форма 2).
         constexpr static float kCellBelowMinOffsetY{ 12.0f };          ///< Мин. отступ вниз от заголовка до цифры (Форма 2).
-        constexpr static float kCellBelowMaxOffsetY{ 60.0f };          ///< Макс. отступ вниз от заголовка до цифры (Форма 2).
+        constexpr static float kCellBelowMaxOffsetY{ 85.0f };          ///< Макс. отступ вниз от заголовка до цифры (Форма 2).
         constexpr static float kCellRightMaxOffsetY{ 22.0f };          ///< Макс. отклонение по Y в той же строке (Форма 1).
         constexpr static float kSheetRightMinOffsetX{ 35.0f };         ///< Мин. отступ вправо от «Лист» до цифры (Форма 1).
         constexpr static float kSheetRightMaxOffsetX{ 140.0f };        ///< Макс. отступ вправо от «Лист» до цифры (Форма 1).
@@ -517,9 +541,41 @@ namespace pdm::infrastructure
         constexpr static int kMinForm2aCropSizePx{ 15 };               ///< Минимальный размер ячейки Формы 2а в пикселях.
         constexpr static int kMinFallbackForm2aSheet{ 2 };             ///< Минимальный номер листа по умолчанию для Формы 2а.
 
+        // Геометрические пороги поиска полей относительно правого нижнего угла рамки штампа (corner)
+        // В нормализованном кропе 1150x650 (с kCropExpansion = 1.3) масштаб составляет ~4.53 px/мм по ГОСТ 2.104:
+        // полная ширина штампа (185 мм) ≈ 840 px, высота Формы 1 (55 мм) ≈ 250 px, Формы 2 (40 мм) ≈ 180 px, Формы 2а (15 мм) ≈ 70 px.
+        // Геометрические пороги поиска полей относительно правого нижнего угла рамки штампа (corner)
+        constexpr static float kStampTotalWidthPx{ 1100.0f };         ///< Полная ширина штампа 185 мм влево от corner.x (захватывает x=66 на Data005).
+        constexpr static float kStampMaxHeightPx{ 560.0f };           ///< Максимальная высота штампа вверх от нижнего угла.
+        constexpr static float kStampRightColsWidthPx{ 550.0f };      ///< Ширина правой колонки 65 мм (отсекает Лит x=696 и АО 192 ЦЗЖТ x=653).
+        constexpr static float kForm2aRightColWidthPx{ 115.0f };      ///< Ширина ячейки «Лист» 10 мм справа на Форме 2а.
+        constexpr static float kStampBottomEdgeTolPx{ 65.0f };        ///< Отступ от нижней линии рамки (отсекает «Копировал / Формат»).
+
+        // Геометрические пороги поиска графы «Наименование» (Графа 1 по ГОСТ 2.104)
+        // Привязаны к децимальному номеру (numPos), поэтому автоматически следуют за сдвигами штампа на 10–20 мм:
+        constexpr static float kNameLeftFromNumPx{ 285.0f };          ///< Макс. сдвиг влево от X номера (отсекает колонку «Дата» при любом сдвиге штампа).
+        constexpr static float kNameMaxHeightFromNumPx{ 265.0f };     ///< Макс. высота от Y номера вниз до графы «Материал» (отсекает ГОСТы, сталь и «Лист»).
+
+        // Пороги расстояния от Y децимального номера до нижней линии рамки (corner.y - numPos.y)
+        constexpr static float kForm2aMaxDistFromBottomPx{ 210.0f };  ///< Форма 2а (высота 15 мм, dist ≈ 160..200 px).
+        constexpr static float kForm2MaxDistFromBottomPx{ 390.0f };   ///< Форма 2 (высота 40 мм, dist ≈ 297..367 px).
+
+        // Прямые ROI-области ячеек «Лист» и «Листов» относительно правого нижнего угла рамки (corner)
+        constexpr static int kForm2aSheetCellOffsetX{ 95 };           ///< Отступ влево от corner.x до ячейки «Лист» на Форме 2а (графа 10 мм).
+        constexpr static int kForm2aSheetCellOffsetY{ 65 };           ///< Отступ вверх от corner.y до ячейки цифры «Лист» на Форме 2а.
+        constexpr static int kForm2aSheetCellW{ 90 };                 ///< Ширина прямого кропа ячейки «Лист» на Форме 2а.
+        constexpr static int kForm2aSheetCellH{ 60 };                 ///< Высота прямого кропа ячейки «Лист» на Форме 2а.
+
+        constexpr static int kForm12TotalCellOffsetX{ 140 };          ///< Отступ влево от corner.x до ячейки «Листов» (Форма 1 и 2).
+        constexpr static int kForm12SheetCellOffsetX{ 255 };          ///< Отступ влево от corner.x до ячейки «Лист» (Форма 1 и 2).
+        constexpr static int kForm1TotalCellOffsetY{ 165 };           ///< Отступ вверх от corner.y до строки «Листов» (Форма 1).
+        constexpr static int kForm2TotalCellOffsetY{ 150 };           ///< Отступ вверх от corner.y до ячейки цифры «Листов» (Форма 2).
+        constexpr static int kForm12CellCropW{ 115 };                 ///< Ширина прямого кропа ячейки «Лист»/«Листов» (Форма 1 и 2).
+        constexpr static int kForm12CellCropH{ 55 };                  ///< Высота прямого кропа ячейки «Лист»/«Листов» (Форма 1 и 2).
+
         // Варианты распознавания заголовка графы «Листов» (проверяются первыми, так как включают подстроку «Лист»)
-        static constexpr std::array<std::string_view, 14> kTotalSheetsKeywords{
-            "Листов", "Листоб", "Лucmob", "Лucmoб", "Листо8", "Листо",
+        static constexpr std::array<std::string_view, 15> kTotalSheetsKeywords{
+            "Листов", "Листоб", "Лucmob", "Лucmoб", "Листо8", "Листо", "Лисmов",
             "Пустоб", "ПистоВ", "Пистов", "Шucmoб", "ucino", "ucmo", "ucmm", "cmm"
         };
 
@@ -536,14 +592,16 @@ namespace pdm::infrastructure
         constexpr static size_t kUtf8CyrillicCharBytes{ 2 };   ///< Размер одной кириллической буквы в кодировке UTF-8.
 
         // Соответствие хвостов номера кодам конструкторских документов (включая типовые ошибки OCR)
-        constexpr static std::array<std::pair<std::string_view, pdm::shared::DocumentTypeCode>, 7> kTrailingDocCodes{ {
-            { "СБ", pdm::shared::DocumentTypeCode::AssemblyDrawing },
-            { "CB", pdm::shared::DocumentTypeCode::AssemblyDrawing },
-            { "C5", pdm::shared::DocumentTypeCode::AssemblyDrawing },
-            { "C6", pdm::shared::DocumentTypeCode::AssemblyDrawing },
-            { "05", pdm::shared::DocumentTypeCode::AssemblyDrawing },
-            { "ТУ", pdm::shared::DocumentTypeCode::TechnicalSpecifications },
-            { "TY", pdm::shared::DocumentTypeCode::TechnicalSpecifications }
+        constexpr static std::array<std::pair<std::string_view, pdm::shared::DocumentTypeCode>, 9> kTrailingDocCodes{ {
+                      { "СБ", pdm::shared::DocumentTypeCode::AssemblyDrawing },
+                      { "CB", pdm::shared::DocumentTypeCode::AssemblyDrawing },
+                      { "C5", pdm::shared::DocumentTypeCode::AssemblyDrawing },
+                      { "C6", pdm::shared::DocumentTypeCode::AssemblyDrawing },
+                      { "C8", pdm::shared::DocumentTypeCode::AssemblyDrawing },
+                      { "С8", pdm::shared::DocumentTypeCode::AssemblyDrawing },
+                      { "05", pdm::shared::DocumentTypeCode::AssemblyDrawing },
+                      { "ТУ", pdm::shared::DocumentTypeCode::TechnicalSpecifications },
+                      { "TY", pdm::shared::DocumentTypeCode::TechnicalSpecifications }
         } };
 
         // Полнотекстовые маркеры кода документа, встречающиеся в графе наименования изделия
@@ -583,7 +641,10 @@ namespace pdm::infrastructure
            { "Опорабереговая", "Опора береговая" },
            { "дереговая", "береговая" },
            { "Ьалка", "Балка" },
-           { "ьалка", "балка" }
+           { "ьалка", "балка" },
+           { "краинии", "крайний" },
+           { "краинего", "крайнего" },
+           { "палудный", "палубный" }
         });
     };
 
