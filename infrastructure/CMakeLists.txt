@@ -13,10 +13,11 @@ target_include_directories(infrastructure PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 set_target_properties(infrastructure PROPERTIES LINKER_LANGUAGE CXX)
 
-find_package(Qt6 REQUIRED COMPONENTS Core)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui)
 
 target_link_libraries(infrastructure PUBLIC
     Qt6::Core
+    Qt6::Gui
     shared
     stb
     stb_image_resize
