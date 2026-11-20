@@ -1159,8 +1159,11 @@ cv::Mat OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imag
         qDebug().noquote() << "[OpenCV-DNN] Scan DPI metadata is unavailable; using 300-DPI crop dimensions.";
     }
 
-    const int cropW{ std::max(1, cvRound(kCropW * scaleX)) };
-    const int cropH{ std::max(1, cvRound(kCropH * scaleY)) };
+    // На 300 DPI область должна быть примерно на 20% шире и выше прежней,
+    // расширяясь от найденного нижнего правого угла влево и вверх.
+    constexpr double kCropExpansion{ 1.20 };
+    const int cropW{ std::max(1, cvRound(kCropW * scaleX * kCropExpansion)) };
+    const int cropH{ std::max(1, cvRound(kCropH * scaleY * kCropExpansion)) };
     const int offsetX{ std::max(0, cvRound(kOffsetX * scaleX)) };
     const int offsetY{ std::max(0, cvRound(kOffsetY * scaleY)) };
     const int padRight{ cvRound(kCornerPadRightPx * scaleX) };
