@@ -70,59 +70,6 @@ std::vector<int> OnnxStampRecognizer::findLinePeaksFromEnd(const cv::Mat& projec
 
 
 
-/**
- * @brief Выравнивает небольшой перекос скана (в пределах +-5 градусов) по длинным линиям рамки.
- * @param gray Исходное изображение в градациях серого (`CV_8UC1`).
- * @return Выровненное изображение (или копия исходного, если наклон меньше 0.15 градуса).
- */
-cv::Mat deskewGrayImage(const cv::Mat& gray)
-{
-    cv::Mat small{};
-    cv::resize(gray, small, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
-
-    cv::Mat edges{};
-    cv::Canny(small, edges, 50, 150, 3);
-
-    std::vector<cv::Vec4i> lines{};
-    cv::HoughLinesP(edges, lines, 1, CV_PI / 180.0, 100, small.cols * 0.25, 20);
-
-    std::vector<double> angles{};
-    for(const auto& l : lines)
-    {
-        const double dx{ static_cast<double>(l[2] - l[0]) };
-        const double dy{ static_cast<double>(l[3] - l[1]) };
-        if(std::abs(dx) > std::abs(dy))
-        {
-            const double deg{ std::atan2(dy, dx) * 180.0 / CV_PI };
-            if(std::abs(deg) <= 5.0)
-            {
-                angles.push_back(deg);
-            }
-        }
-    }
-
-    if(angles.empty())
-    {
-        return gray;
-    }
-
-    std::sort(angles.begin(), angles.end());
-    const double medianAngle{ angles.at(angles.size() / 2) };
-
-    if(std::abs(medianAngle) < 0.15)
-    {
-        return gray;
-    }
-
-    const cv::Point2f center{ gray.cols * 0.5f, gray.rows * 0.5f };
-    const cv::Mat rotMat{ cv::getRotationMatrix2D(center, medianAngle, 1.0) };
-
-    cv::Mat rotated{};
-    cv::warpAffine(gray, rotated, rotMat, gray.size(), cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(255));
-    return rotated;
-}
-
-
 
 std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const cv::Mat& fullGray)
 {
@@ -147,25 +94,29 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
     const int offsetY{ cleanH - zoneH };
     const cv::Mat zone{ fullGray(cv::Rect(offsetX, offsetY, zoneW, zoneH)) };
 
-    // Инвертируем (линии становятся белыми) и склеиваем мелкие разрывы скана (до 35 px)
-    cv::Mat binary{};
-    cv::threshold(zone, binary, 190, 255, cv::THRESH_BINARY_INV);
+    // 2. Гасим зернистый шум сканера медианным фильтром 3x3 и бинаризуем
+    //    (мягкий порог 190 сохраняет бледно-серые линии рамки на потёртых сканах)
+    cv::Mat denoised{};
+    cv::medianBlur(zone, denoised, 3);
 
+    cv::Mat binary{};
+    cv::threshold(denoised, binary, 190, 255, cv::THRESH_BINARY_INV);
+
+    // Склеиваем мелкие разрывы в линиях и выделяем длинные ортогональные отрезки рамки
     cv::Mat closedH{}, closedV{};
-    cv::morphologyEx(binary, closedH, cv::MORPH_CLOSE, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(35, 1)));
-    cv::morphologyEx(binary, closedV, cv::MORPH_CLOSE, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 25)));
+    cv::morphologyEx(binary, closedH, cv::MORPH_CLOSE, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(55, 1)));
+    cv::morphologyEx(binary, closedV, cv::MORPH_CLOSE, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 55)));
 
     cv::Mat horizMask{}, vertMask{};
     cv::morphologyEx(closedH, horizMask, cv::MORPH_OPEN, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(200, 1)));
     cv::morphologyEx(closedV, vertMask, cv::MORPH_OPEN, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 120)));
 
-    // 2. Поиск вертикальной линии (аналогично горизонтальной — через непрерывные компоненты):
-    //    ищем вертикальную линию длиной >= 80% от высоты зоны поиска в правых 20% ширины скана
+    // 3. Поиск правой вертикальной стенки штампа через непрерывные компоненты
     cv::Mat vLabels{}, vStats{}, vCentroids{};
     const int numVComps{ cv::connectedComponentsWithStats(vertMask, vLabels, vStats, vCentroids) };
 
-    const int minContinuousVertHeightPx{ static_cast<int>(zoneH * 0.80) };
-    const int rightSearchWidthPx{ std::min(zoneW, static_cast<int>(fullGray.cols * 0.20)) };
+    constexpr int kMinContinuousVertHeightPx{ 150 };
+    const int rightSearchWidthPx{ std::min(zoneW, static_cast<int>(fullGray.cols * 0.25)) };
     const int minVertSearchX{ std::max(0, zoneW - rightSearchWidthPx) };
 
     struct VertLineInfo
@@ -183,7 +134,7 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
         const int compHeight{ vStats.at<int>(c, cv::CC_STAT_HEIGHT) };
         const int centerX{ compLeft + compWidth / 2 };
 
-        if(compHeight >= minContinuousVertHeightPx && centerX >= minVertSearchX)
+        if(compHeight >= kMinContinuousVertHeightPx && centerX >= minVertSearchX)
         {
             validVertLines.push_back({ centerX, compTop + compHeight - 1 });
         }
@@ -196,16 +147,18 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
 
     int foundX{ -1 };
     int vertBottomY{ -1 };
+    const bool hasVerticalLine{ !validVertLines.empty() };
 
-    if(!validVertLines.empty())
+    if(hasVerticalLine)
     {
         foundX = validVertLines.at(0).centerX;
         vertBottomY = validVertLines.at(0).bottomY;
 
-        // Если на 5–10 мм (20..65 px) левее внешней рамки формата идёт стенка штампа — переключаемся на неё
+        // Шаг перехода 20..45 px: переходит с внешней рамки формата на стенку штампа,
+        // но не допрыгивает до внутренней перегородки столбца «Лит.»
         if(validVertLines.size() >= 2 &&
             (validVertLines.at(0).centerX - validVertLines.at(1).centerX) >= 20 &&
-            (validVertLines.at(0).centerX - validVertLines.at(1).centerX) <= 65)
+            (validVertLines.at(0).centerX - validVertLines.at(1).centerX) <= 45)
         {
             foundX = validVertLines.at(1).centerX;
             vertBottomY = validVertLines.at(1).bottomY;
@@ -213,52 +166,72 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
     }
     else
     {
-        // Фоллбэк (пункт 1): если длинная вертикальная линия в правых 20% скана не найдена,
-        // ставим точку внизу очищенного скана (с учётом 5 мм отступа от правого края)
         foundX = zoneW - 1;
         vertBottomY = zoneH - 1;
     }
 
-    // 3. Поиск горизонтальной линии снизу вверх:
-    //    ищем НЕПРЕРЫВНЫЙ горизонтальный отрезок длиной >= 800 px в пределах 110 px от низа вертикали
+    // 4. Поиск нижней горизонтальной линии снизу вверх
     cv::Mat hLabels{}, hStats{}, hCentroids{};
     const int numHComps{ cv::connectedComponentsWithStats(horizMask, hLabels, hStats, hCentroids) };
 
-    constexpr int kMinContinuousHorizWidthPx{ 800 };
-    const int minSearchY{ std::max(0, vertBottomY - 110) };
+    constexpr int kMinContinuousHorizWidthPx{ 620 };
+    const int minSearchY{ hasVerticalLine ? std::max(0, vertBottomY - 110) : (zoneH / 2) };
 
-    std::vector<int> validHorizYs{};
+    struct HorizLineInfo
+    {
+        int centerY{ 0 };
+        int rightX{ 0 };
+    };
+    std::vector<HorizLineInfo> validHorizLines{};
+
     for(int c{ 1 }; c < numHComps; ++c)
     {
+        const int compLeft{ hStats.at<int>(c, cv::CC_STAT_LEFT) };
         const int compWidth{ hStats.at<int>(c, cv::CC_STAT_WIDTH) };
         const int compTop{ hStats.at<int>(c, cv::CC_STAT_TOP) };
         const int compHeight{ hStats.at<int>(c, cv::CC_STAT_HEIGHT) };
         const int centerY{ compTop + compHeight / 2 };
+        const int compRight{ compLeft + compWidth - 1 };
 
-        if(compWidth >= kMinContinuousHorizWidthPx && centerY >= minSearchY)
+        if(compWidth >= kMinContinuousHorizWidthPx &&
+            centerY >= minSearchY &&
+            (!hasVerticalLine || compRight >= (foundX - 100)))
         {
-            validHorizYs.push_back(centerY);
+            validHorizLines.push_back({ centerY, compRight });
         }
     }
 
-    std::sort(validHorizYs.begin(), validHorizYs.end(), std::greater<int>());
+    std::sort(validHorizLines.begin(), validHorizLines.end(), [](const HorizLineInfo& a, const HorizLineInfo& b) {
+        return a.centerY > b.centerY;
+    });
 
     int foundY{ -1 };
-    if(!validHorizYs.empty())
+    if(!validHorizLines.empty())
     {
-        foundY = validHorizYs.at(0);
-        // Уменьшенный шаг перехода (15..42 px): перепрыгивает только с внешней рамки формата на дно штампа,
-        // но не достаёт до верхней границы штампа Формы 2а (~75–85 px)
-        if(validHorizYs.size() >= 2 &&
-            (validHorizYs.at(0) - validHorizYs.at(1)) >= 15 &&
-            (validHorizYs.at(0) - validHorizYs.at(1)) <= 42)
+        foundY = validHorizLines.at(0).centerY;
+        if(!hasVerticalLine)
         {
-            foundY = validHorizYs.at(1);
+            // При вертикальном фоллбэке привязываемся к правому концу горизонтальной линии штампа
+            foundX = validHorizLines.at(0).rightX;
+        }
+
+        // Шаг перехода 15..58 px: перепрыгивает с внешней тонкой рамки листа на дно штампа
+        if(validHorizLines.size() >= 2 &&
+            (validHorizLines.at(0).centerY - validHorizLines.at(1).centerY) >= 15 &&
+            (validHorizLines.at(0).centerY - validHorizLines.at(1).centerY) <= 58)
+        {
+            foundY = validHorizLines.at(1).centerY;
+            if(!hasVerticalLine)
+            {
+                foundX = validHorizLines.at(1).rightX;
+            }
         }
     }
 
-    // 4. Фоллбэк по вертикали, если длинная горизонтальная линия внизу оборвана
-    if(foundY < 0)
+    // 5. Защита для Формы 2а и оборванного дна штампа:
+    //    если горизонтальная линия не найдена или оказалась выше конца вертикали более чем на 35 px,
+    //    принимаем за низ конец вертикальной стенки
+    if(foundY < 0 || (hasVerticalLine && foundY < vertBottomY && (vertBottomY - foundY) > 35))
     {
         foundY = vertBottomY;
     }

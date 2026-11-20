@@ -420,7 +420,7 @@ namespace pdm::infrastructure
         constexpr static int kMinHorizLineScore{ 300 * 255 };   ///< Минимальная суммарная яркость строки (не менее 300 белых пикселей).
         constexpr static int kMinVertLineScore{ 120 * 255 };    ///< Минимальная суммарная яркость столбца (не менее 120 белых пикселей).
         constexpr static int kEdgeIgnoreMarginPx{ 2 };          ///< Отступ от самого края скана для отсечения чёрных полос сканера.
-        constexpr static int kCornerPadRightPx{ 25 };           ///< Запас вправо от найденного угла штампа при вырезке.
+        constexpr static int kCornerPadRightPx{ 45 };           ///< Запас вправо от найденного угла штампа при вырезке.
         constexpr static int kCornerPadBottomPx{ 135 };          ///< Запас вниз от найденного угла (чтобы захватить строку «Формат»).
 
         // Параметры постобработки детектора DBNet (стандартные значения PaddleOCR / RapidOCR)
@@ -445,7 +445,7 @@ namespace pdm::infrastructure
         // Геометрия вырезки области основной надписи (правый нижний угол чертежа)
         constexpr static int kOffsetX{ 5 };
         constexpr static int kOffsetY{ 5 };
-        constexpr static int kCropW{ 1120 };
+        constexpr static int kCropW{ 1150 };
         constexpr static int kCropH{ 580 };
 
         // Параметры адаптивного выравнивания контраста (CLAHE) для тусклых сканов
