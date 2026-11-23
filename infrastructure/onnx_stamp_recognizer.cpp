@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <regex>
 #include <sstream>
@@ -29,316 +30,225 @@
 namespace pdm::infrastructure
 {
 
-void OnnxStampRecognizer::setDebugOutputDir(const std::filesystem::path& debugDir)
+namespace
 {
-    m_debugDir = debugDir;
-    if(!m_debugDir.empty())
+
+cv::Mat loadGrayImage(const std::filesystem::path& imagePath)
+{
+    Image img{ imagePath };
+    const int fullW{ img.width() };
+    const int fullH{ img.height() };
+    const int channels{ img.channels() };
+    const unsigned char* rawData{ img.get() };
+
+    if(!rawData || fullW <= 0 || fullH <= 0 || (channels != 1 && channels != 3 && channels != 4))
     {
-        std::error_code ec{};
-        std::filesystem::create_directories(m_debugDir, ec);
+        return {};
     }
+
+    const int srcType{ (channels == 1) ? CV_8UC1 : (channels == 4 ? CV_8UC4 : CV_8UC3) };
+    const int toGrayCode{ (channels == 1) ? -1
+                                         : (channels == 4 ? cv::COLOR_RGBA2GRAY
+                                                          : cv::COLOR_RGB2GRAY) };
+
+    const cv::Mat srcMat{ fullH, fullW, srcType, const_cast<unsigned char*>(rawData) };
+    cv::Mat fullGray{};
+    if(toGrayCode == -1)
+    {
+        fullGray = srcMat.clone();
+    }
+    else
+    {
+        cv::cvtColor(srcMat, fullGray, toGrayCode);
+    }
+
+    return fullGray;
+}
+
+std::pair<double, double> readDpiScale(const std::filesystem::path& imagePath)
+{
+    constexpr double kReferenceDpi{ 300.0 };
+    constexpr double kMetersPerInch{ 0.0254 };
+
+    double scaleX{ 1.0 };
+    double scaleY{ 1.0 };
+    QImageReader metadataReader{ QString::fromStdString(imagePath.string()) };
+    const QImage metadataImage{ metadataReader.read() };
+    if(!metadataImage.isNull() &&
+        metadataImage.dotsPerMeterX() > 0 &&
+        metadataImage.dotsPerMeterY() > 0)
+    {
+        const double dpiX{ metadataImage.dotsPerMeterX() * kMetersPerInch };
+        const double dpiY{ metadataImage.dotsPerMeterY() * kMetersPerInch };
+        scaleX = dpiX / kReferenceDpi;
+        scaleY = dpiY / kReferenceDpi;
+    }
+
+    return { scaleX, scaleY };
+}
+
+void saveStampDebugImage(const std::filesystem::path& debugDir,
+                         const std::filesystem::path& imagePath,
+                         const cv::Mat& fullGray,
+                         const cv::Rect& cropRect,
+                         const std::optional<cv::Point>& corner)
+{
+    if(debugDir.empty())
+    {
+        return;
+    }
+
+    cv::Mat fullDebugVis{};
+    cv::cvtColor(fullGray, fullDebugVis, cv::COLOR_GRAY2BGR);
+    cv::rectangle(fullDebugVis, cropRect, cv::Scalar(255, 0, 0), 3);
+    if(corner.has_value())
+    {
+        cv::drawMarker(fullDebugVis, *corner, cv::Scalar(0, 200, 0), cv::MARKER_CROSS, 80, 6);
+    }
+    const auto outPath{ debugDir / ("debug_full_" + imagePath.filename().string()) };
+    cv::imwrite(outPath.string(), fullDebugVis);
 }
 
 
-
-
-std::vector<int> OnnxStampRecognizer::findLinePeaksFromEnd(const cv::Mat& projection,
-                                                           int minScore,
-                                                           int ignoreMargin,
-                                                           int minPeakDistance)
+struct StampSegment
 {
-    const int len{ static_cast<int>(projection.total()) };
-    const int* ptr{ projection.ptr<int>() };
+    int start{ 0 };
+    int end{ 0 };
+    int pos{ 0 };
+};
 
-    std::vector<int> peaks{};
-    for(int i{ len - 1 - ignoreMargin }; i >= ignoreMargin; --i)
+std::vector<StampSegment> extractStampSegments(const cv::Mat& mask, bool horizontal, int minLen)
+{
+    cv::Mat labels{}, stats{}, centroids{};
+    const int n{ cv::connectedComponentsWithStats(mask, labels, stats, centroids) };
+    std::vector<StampSegment> segs{};
+    segs.reserve(static_cast<size_t>(n));
+    for(int i{ 1 }; i < n; ++i)
     {
-        if(ptr[i] >= minScore)
+        const int l{ stats.at<int>(i, cv::CC_STAT_LEFT) };
+        const int t{ stats.at<int>(i, cv::CC_STAT_TOP) };
+        const int w{ stats.at<int>(i, cv::CC_STAT_WIDTH) };
+        const int h{ stats.at<int>(i, cv::CC_STAT_HEIGHT) };
+        if(horizontal && w >= minLen)
         {
-            // Проверяем, не относится ли этот пиксель к уже найденной толстой линии
-            if(peaks.empty() || (peaks.back() - i) >= minPeakDistance)
-            {
-                peaks.push_back(i);
-            }
-            else if(ptr[i] > ptr[peaks.back()])
-            {
-                // Уточняем центр линии по максимальной яркости
-                peaks.back() = i;
-            }
+            segs.push_back({ l, l + w - 1, t + h / 2 });
+        }
+        else if(!horizontal && h >= minLen)
+        {
+            segs.push_back({ t, t + h - 1, l + w / 2 });
         }
     }
-    return peaks;
+    return segs;
 }
 
-
-
-
-std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const cv::Mat& fullGray)
+std::optional<int> findStampEdgeByProfile(const std::vector<StampSegment>& segs,
+                                          int maxCoord,
+                                          int minCoord,
+                                          int minJump,
+                                          size_t minGroupSize,
+                                          int stabilityWidth = 12,
+                                          int clusterTol = 25)
 {
-    if(fullGray.empty() || fullGray.type() != CV_8UC1)
+    if(maxCoord - minCoord <= stabilityWidth || segs.empty())
     {
         return std::nullopt;
     }
 
-    // 1. Вырезаем правую нижнюю область поиска
-    const int zoneW{ std::min(kSearchZoneWidthPx, fullGray.cols) };
-    const int zoneH{ std::min(kSearchZoneHeightPx, fullGray.rows) };
-    if(zoneW <= 200 || zoneH <= 200)
+    std::vector<int> profile(static_cast<size_t>(maxCoord + 1), 0);
+    for(const auto& segment : segs)
     {
-        return std::nullopt;
+        const int a{ std::clamp(segment.start, 0, maxCoord) };
+        const int b{ std::clamp(segment.end, 0, maxCoord) };
+        for(int coord{ a }; coord <= b; ++coord)
+        {
+            ++profile[static_cast<size_t>(coord)];
+        }
     }
 
-    const int offsetX{ fullGray.cols - zoneW };
-    const int offsetY{ fullGray.rows - zoneH };
-    const cv::Mat zone{ fullGray(cv::Rect(offsetX, offsetY, zoneW, zoneH)) };
-
-    // 2. Адаптивно определяем границы чёрных полей сканера справа и снизу
-    int searchRight{ zoneW - 1 };
-    while(searchRight > zoneW / 2)
+    std::vector<int> edgeSamples{};
+    for(int coord{ maxCoord }; coord > std::max(minCoord, maxCoord - 15); --coord)
     {
-        const cv::Mat col{ zone.col(searchRight) };
-        const int darkPixels{ zoneH - cv::countNonZero(col > 50) };
-        if(darkPixels < static_cast<int>(zoneH * 0.85))
-        {
-            break;
-        }
-        --searchRight;
+        edgeSamples.push_back(profile[static_cast<size_t>(coord)]);
     }
+    std::sort(edgeSamples.begin(), edgeSamples.end());
+    const int baseline{ edgeSamples.empty() ? 0 : edgeSamples[edgeSamples.size() / 2] };
 
-    int searchBottom{ zoneH - 1 };
-    while(searchBottom > zoneH / 2)
+    int stableEntry{ -1 };
+    int streak{ 0 };
+    for(int coord{ maxCoord }; coord >= minCoord; --coord)
     {
-        const cv::Mat row{ zone.row(searchBottom) };
-        const int darkPixels{ zoneW - cv::countNonZero(row > 50) };
-        if(darkPixels < static_cast<int>(zoneW * 0.85))
+        if(profile[static_cast<size_t>(coord)] - baseline >= minJump)
         {
-            break;
-        }
-        --searchBottom;
-    }
-
-    // 3. Шумоподавление, адаптивная бинаризация бледных линий, закрытие разрывов и разделение осей
-    cv::Mat denoised{};
-    cv::medianBlur(zone, denoised, 3);
-
-    cv::Mat binary{};
-    cv::adaptiveThreshold(denoised, binary, 255,
-                          cv::ADAPTIVE_THRESH_GAUSSIAN_C,
-                          cv::THRESH_BINARY_INV, 25, 20);
-
-    // Обнуляем найденные чёрные полосы сканера на бинарной маске
-    if(searchRight < zoneW - 1)
-    {
-        binary.colRange(searchRight + 1, zoneW).setTo(0);
-    }
-    if(searchBottom < zoneH - 1)
-    {
-        binary.rowRange(searchBottom + 1, zoneH).setTo(0);
-    }
-
-    constexpr int kHorizClosePx{ 35 };
-    constexpr int kVertClosePx{ 20 };
-    constexpr int kMinHorizSegPx{ 85 };
-    constexpr int kMinVertSegPx{ 32 };
-
-    cv::Mat closedH{}, closedV{};
-    cv::morphologyEx(binary, closedH, cv::MORPH_CLOSE,
-                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kHorizClosePx, 1)));
-    cv::morphologyEx(binary, closedV, cv::MORPH_CLOSE,
-                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, kVertClosePx)));
-
-    cv::Mat horizMask{}, vertMask{};
-    cv::morphologyEx(closedH, horizMask, cv::MORPH_OPEN,
-                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kMinHorizSegPx, 1)));
-    cv::morphologyEx(closedV, vertMask, cv::MORPH_OPEN,
-                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, kMinVertSegPx)));
-
-    // 4. Извлекаем уникальные горизонтальные и вертикальные отрезки через связные компоненты
-    struct Segment
-    {
-        int start{ 0 };
-        int end{ 0 };
-        int pos{ 0 };
-    };
-
-    auto extractSegments = [](const cv::Mat& mask, bool horizontal, int minLen) -> std::vector<Segment> {
-        cv::Mat labels{}, stats{}, centroids{};
-        const int n{ cv::connectedComponentsWithStats(mask, labels, stats, centroids) };
-        std::vector<Segment> segs{};
-        segs.reserve(static_cast<size_t>(n));
-        for(int i{ 1 }; i < n; ++i)
-        {
-            const int l{ stats.at<int>(i, cv::CC_STAT_LEFT) };
-            const int t{ stats.at<int>(i, cv::CC_STAT_TOP) };
-            const int w{ stats.at<int>(i, cv::CC_STAT_WIDTH) };
-            const int h{ stats.at<int>(i, cv::CC_STAT_HEIGHT) };
-            if(horizontal && w >= minLen)
+            ++streak;
+            if(streak >= stabilityWidth)
             {
-                segs.push_back({ l, l + w - 1, t + h / 2 });
-            }
-            else if(!horizontal && h >= minLen)
-            {
-                segs.push_back({ t, t + h - 1, l + w / 2 });
-            }
-        }
-        return segs;
-    };
-
-    const auto hSegs{ extractSegments(horizMask, true, kMinHorizSegPx) };
-    const auto vSegs{ extractSegments(vertMask, false, kMinVertSegPx) };
-
-    // Вспомогательная функция поиска координаты по профилю пересечений и медиане плотного кластера окончаний
-    auto findEdgeByProfile = [](const std::vector<Segment>& segs,
-                                int maxCoord,
-                                int minCoord,
-                                int minJump,
-                                size_t minGroupSize,
-                                int stabilityWidth = 12,
-                                int clusterTol = 25) -> std::optional<int> {
-        if(maxCoord - minCoord <= stabilityWidth || segs.empty())
-        {
-            return std::nullopt;
-        }
-
-        // Строим профиль количества уникальных линий на каждой координате
-        std::vector<int> profile(static_cast<size_t>(maxCoord + 1), 0);
-        for(const auto& s : segs)
-        {
-            const int a{ std::clamp(s.start, 0, maxCoord) };
-            const int b{ std::clamp(s.end, 0, maxCoord) };
-            for(int c{ a }; c <= b; ++c)
-            {
-                ++profile[static_cast<size_t>(c)];
-            }
-        }
-
-        // Базовый фон у края листа (медиана первых 15 px от стартовой границы поиска)
-        std::vector<int> edgeSamples{};
-        for(int c{ maxCoord }; c > std::max(minCoord, maxCoord - 15); --c)
-        {
-            edgeSamples.push_back(profile[static_cast<size_t>(c)]);
-        }
-        std::sort(edgeSamples.begin(), edgeSamples.end());
-        const int baseline{ edgeSamples.empty() ? 0 : edgeSamples[edgeSamples.size() / 2] };
-
-        // Ищем первый устойчивый скачок при движении от края к центру
-        int stableEntry{ -1 };
-        int streak{ 0 };
-        for(int c{ maxCoord }; c >= minCoord; --c)
-        {
-            if(profile[static_cast<size_t>(c)] - baseline >= minJump)
-            {
-                ++streak;
-                if(streak >= stabilityWidth)
-                {
-                    stableEntry = c;
-                    break;
-                }
-            }
-            else
-            {
-                streak = 0;
-            }
-        }
-
-        if(stableEntry < 0)
-        {
-            return std::nullopt;
-        }
-
-        // Собираем окончания линий, пересекающих подтверждённую позицию входа
-        std::vector<int> ends{};
-        for(const auto& s : segs)
-        {
-            if(s.start <= stableEntry && s.end >= stableEntry)
-            {
-                ends.push_back(s.end);
-            }
-        }
-
-        if(ends.size() < minGroupSize)
-        {
-            return std::nullopt;
-        }
-
-        // Сортируем окончания от края к центру (по убыванию) и выбираем самый крайний плотный кластер
-        std::sort(ends.begin(), ends.end(), std::greater<int>());
-        std::vector<int> bestCluster{};
-
-        for(size_t i{ 0 }; i < ends.size(); ++i)
-        {
-            std::vector<int> cluster{};
-            for(size_t j{ i }; j < ends.size(); ++j)
-            {
-                if(ends[i] - ends[j] <= clusterTol)
-                {
-                    cluster.push_back(ends[j]);
-                }
-            }
-            if(cluster.size() >= minGroupSize)
-            {
-                bestCluster = std::move(cluster);
+                stableEntry = coord;
                 break;
             }
         }
-
-        if(bestCluster.size() < minGroupSize)
+        else
         {
-            return std::nullopt;
+            streak = 0;
         }
-
-        // Возвращаем медиану выбранного кластера
-        std::sort(bestCluster.begin(), bestCluster.end());
-        return bestCluster[bestCluster.size() / 2];
-    };
-
-    // 5. Сначала определяем нижнюю координату Y
-    // 5. Сначала определяем нижнюю координату Y.
-    // В нижней части Формы 1 (графа организации) всего 2 вертикальные линии рамки (левая и правая),
-    // поэтому используем minJump = 2 (с запасным minJump = 1).
-    const int minSearchY{ std::max(0, searchBottom - 350) };
-    auto foundY{ findEdgeByProfile(vSegs, searchBottom, minSearchY, 2, 2) };
-    if(!foundY.has_value())
-    {
-        foundY = findEdgeByProfile(vSegs, searchBottom, minSearchY, 1, 2, 12, 30);
     }
 
-    if(!foundY.has_value())
+    if(stableEntry < 0)
     {
         return std::nullopt;
     }
 
-    // 6. Оставляем только горизонтальные линии, лежащие по высоте внутри штампа
-    constexpr int kMaxStampBandHeightPx{ 340 };
-    constexpr int kBottomBandTolPx{ 12 };
-
-    std::vector<Segment> stampHSegs{};
-    stampHSegs.reserve(hSegs.size());
-    for(const auto& s : hSegs)
+    std::vector<int> ends{};
+    for(const auto& segment : segs)
     {
-        if(s.pos >= (*foundY - kMaxStampBandHeightPx) && s.pos <= (*foundY + kBottomBandTolPx))
+        if(segment.start <= stableEntry && segment.end >= stableEntry)
         {
-            stampHSegs.push_back(s);
+            ends.push_back(segment.end);
+        }
+    }
+    if(ends.size() < minGroupSize)
+    {
+        return std::nullopt;
+    }
+
+    std::sort(ends.begin(), ends.end(), std::greater<int>());
+    std::vector<int> bestCluster{};
+    for(size_t i{ 0 }; i < ends.size(); ++i)
+    {
+        std::vector<int> cluster{};
+        for(size_t j{ i }; j < ends.size(); ++j)
+        {
+            if(ends[i] - ends[j] <= clusterTol)
+            {
+                cluster.push_back(ends[j]);
+            }
+        }
+        if(cluster.size() >= minGroupSize)
+        {
+            bestCluster = std::move(cluster);
+            break;
         }
     }
 
-    // Определяем правую координату X по горизонтальным линиям внутри полосы штампа
-    const int minSearchX{ std::max(0, searchRight - 900) };
-    auto foundX{ findEdgeByProfile(stampHSegs, searchRight, minSearchX, 2, 3) };
-    if(!foundX.has_value())
+    if(bestCluster.size() < minGroupSize)
     {
-        foundX = findEdgeByProfile(stampHSegs, searchRight, minSearchX, 2, 2);
-    }
-    if(!foundX.has_value())
-    {
-        foundX = findEdgeByProfile(stampHSegs, searchRight, minSearchX, 1, 2, 12, 30);
+        return std::nullopt;
     }
 
+    std::sort(bestCluster.begin(), bestCluster.end());
+    return bestCluster[bestCluster.size() / 2];
+}
+
+void findStampCornerFallback(const std::vector<StampSegment>& hSegs,
+                             const std::vector<StampSegment>& vSegs,
+                             int searchBottom,
+                             std::optional<int>& foundX,
+                             std::optional<int>& foundY)
+{
     // Запасной поиск напрямую по длинным отрезкам штампа, если профильный поиск не сработал
     if(!foundY.has_value() || !foundX.has_value())
     {
         // 1. Собираем все горизонтальные отрезки длиннее 100 px
-        std::vector<Segment> longH{};
+        std::vector<StampSegment> longH{};
         for(const auto& s : hSegs)
         {
             if((s.end - s.start) >= 100 && s.pos <= searchBottom - 5)
@@ -350,7 +260,7 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
         // 2. Ищем самый правый кластер из >= 2 горизонтальных линий, заканчивающихся на одной вертикали (±25 px)
         if(!foundX.has_value() && !longH.empty())
         {
-            std::sort(longH.begin(), longH.end(), [](const Segment& a, const Segment& b) {
+            std::sort(longH.begin(), longH.end(), [](const StampSegment& a, const StampSegment& b) {
                 return a.end > b.end;
             });
 
@@ -402,6 +312,164 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
         }
     }
 
+}
+
+struct StampLineSegments
+{
+    std::vector<StampSegment> horizontal{};
+    std::vector<StampSegment> vertical{};
+};
+
+StampLineSegments extractStampLineSegments(const cv::Mat& zone, int searchRight, int searchBottom)
+{
+    // 3. Шумоподавление, адаптивная бинаризация бледных линий, закрытие разрывов и разделение осей
+    cv::Mat denoised{};
+    cv::medianBlur(zone, denoised, 3);
+
+    cv::Mat binary{};
+    cv::adaptiveThreshold(denoised, binary, 255,
+                          cv::ADAPTIVE_THRESH_GAUSSIAN_C,
+                          cv::THRESH_BINARY_INV, 25, 20);
+
+    // Обнуляем найденные чёрные полосы сканера на бинарной маске
+    if(searchRight < zone.cols - 1)
+    {
+        binary.colRange(searchRight + 1, zone.cols).setTo(0);
+    }
+    if(searchBottom < zone.rows - 1)
+    {
+        binary.rowRange(searchBottom + 1, zone.rows).setTo(0);
+    }
+
+    constexpr int kHorizClosePx{ 35 };
+    constexpr int kVertClosePx{ 20 };
+    constexpr int kMinHorizSegPx{ 85 };
+    constexpr int kMinVertSegPx{ 32 };
+
+    cv::Mat closedH{}, closedV{};
+    cv::morphologyEx(binary, closedH, cv::MORPH_CLOSE,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kHorizClosePx, 1)));
+    cv::morphologyEx(binary, closedV, cv::MORPH_CLOSE,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, kVertClosePx)));
+
+    cv::Mat horizMask{}, vertMask{};
+    cv::morphologyEx(closedH, horizMask, cv::MORPH_OPEN,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kMinHorizSegPx, 1)));
+    cv::morphologyEx(closedV, vertMask, cv::MORPH_OPEN,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, kMinVertSegPx)));
+
+    // 4. Извлекаем уникальные горизонтальные и вертикальные отрезки через связные компоненты
+    const auto hSegs{ extractStampSegments(horizMask, true, kMinHorizSegPx) };
+    const auto vSegs{ extractStampSegments(vertMask, false, kMinVertSegPx) };
+
+
+    return { hSegs, vSegs };
+}
+
+} // namespace
+
+
+void OnnxStampRecognizer::setDebugOutputDir(const std::filesystem::path& debugDir)
+{
+    m_debugDir = debugDir;
+    if(!m_debugDir.empty())
+    {
+        std::error_code ec{};
+        std::filesystem::create_directories(m_debugDir, ec);
+    }
+}
+
+std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const cv::Mat& fullGray)
+{
+    if(fullGray.empty() || fullGray.type() != CV_8UC1)
+    {
+        return std::nullopt;
+    }
+
+    // 1. Вырезаем правую нижнюю область поиска
+    const int zoneW{ std::min(kSearchZoneWidthPx, fullGray.cols) };
+    const int zoneH{ std::min(kSearchZoneHeightPx, fullGray.rows) };
+    if(zoneW <= 200 || zoneH <= 200)
+    {
+        return std::nullopt;
+    }
+
+    const int offsetX{ fullGray.cols - zoneW };
+    const int offsetY{ fullGray.rows - zoneH };
+    const cv::Mat zone{ fullGray(cv::Rect(offsetX, offsetY, zoneW, zoneH)) };
+
+    // 2. Адаптивно определяем границы чёрных полей сканера справа и снизу
+    int searchRight{ zoneW - 1 };
+    while(searchRight > zoneW / 2)
+    {
+        const cv::Mat col{ zone.col(searchRight) };
+        const int darkPixels{ zoneH - cv::countNonZero(col > 50) };
+        if(darkPixels < static_cast<int>(zoneH * 0.85))
+        {
+            break;
+        }
+        --searchRight;
+    }
+
+    int searchBottom{ zoneH - 1 };
+    while(searchBottom > zoneH / 2)
+    {
+        const cv::Mat row{ zone.row(searchBottom) };
+        const int darkPixels{ zoneW - cv::countNonZero(row > 50) };
+        if(darkPixels < static_cast<int>(zoneW * 0.85))
+        {
+            break;
+        }
+        --searchBottom;
+    }
+
+    const StampLineSegments lineSegments{ extractStampLineSegments(zone, searchRight, searchBottom) };
+    const auto& hSegs{ lineSegments.horizontal };
+    const auto& vSegs{ lineSegments.vertical };
+
+    // 5. Сначала определяем нижнюю координату Y.
+    // В нижней части Формы 1 (графа организации) всего 2 вертикальные линии рамки (левая и правая),
+    // поэтому используем minJump = 2 (с запасным minJump = 1).
+    const int minSearchY{ std::max(0, searchBottom - 350) };
+    auto foundY{ findStampEdgeByProfile(vSegs, searchBottom, minSearchY, 2, 2) };
+    if(!foundY.has_value())
+    {
+        foundY = findStampEdgeByProfile(vSegs, searchBottom, minSearchY, 1, 2, 12, 30);
+    }
+
+    if(!foundY.has_value())
+    {
+        return std::nullopt;
+    }
+
+    // 6. Оставляем только горизонтальные линии, лежащие по высоте внутри штампа
+    constexpr int kMaxStampBandHeightPx{ 340 };
+    constexpr int kBottomBandTolPx{ 12 };
+
+    std::vector<StampSegment> stampHSegs{};
+    stampHSegs.reserve(hSegs.size());
+    for(const auto& s : hSegs)
+    {
+        if(s.pos >= (*foundY - kMaxStampBandHeightPx) && s.pos <= (*foundY + kBottomBandTolPx))
+        {
+            stampHSegs.push_back(s);
+        }
+    }
+
+    // Определяем правую координату X по горизонтальным линиям внутри полосы штампа
+    const int minSearchX{ std::max(0, searchRight - 900) };
+    auto foundX{ findStampEdgeByProfile(stampHSegs, searchRight, minSearchX, 2, 3) };
+    if(!foundX.has_value())
+    {
+        foundX = findStampEdgeByProfile(stampHSegs, searchRight, minSearchX, 2, 2);
+    }
+    if(!foundX.has_value())
+    {
+        foundX = findStampEdgeByProfile(stampHSegs, searchRight, minSearchX, 1, 2, 12, 30);
+    }
+
+    findStampCornerFallback(hSegs, vSegs, searchBottom, foundX, foundY);
+
     if(!foundX.has_value() || !foundY.has_value())
     {
         return std::nullopt;
@@ -423,7 +491,7 @@ std::string OnnxStampRecognizer::normalizeExecutionSuffix(std::string_view rawSu
         {
             return "Б";
         }
-        if (upper == 'G' || upper == 'R' || upper == '?')
+        if (upper == 'G' || upper == 'R' || upper == 'F' || upper == '?')
         {
             return "Г";
         }
@@ -723,7 +791,7 @@ std::string OnnxStampRecognizer::cleanRussianName(std::string s)
         replaceAll(s, typo, fixed);
     }
 
-    trimInPlace(s, ".,- |\\/");
+    trimInPlace(s, ".,- |\\/[]");
 
     // Отсекаем прилипший к вертикальной линии рамки артефакт ('0', '1') в конце кириллического слова
     while (s.size() > 4 && (s.back() == '0' || s.back() == '1'))
@@ -742,35 +810,6 @@ std::string OnnxStampRecognizer::cleanRussianName(std::string s)
 
     return s;
 }
-
-
-
-
-std::string OnnxStampRecognizer::normalizeSuffixLetter(char ch)
-{
-    const char upper{ static_cast<char>(std::toupper(static_cast<unsigned char>(ch))) };
-
-    // В литере исполнения децимального номера латинская 'B' соответствует кириллической 'Б' (в отличие от наименований)
-    if (upper == 'B')
-    {
-        return "Б";
-    }
-
-    // Остальные визуальные двойники (А, С, Е, Н, К, М, О, Р, Т, Х) берём из единой таблицы замен
-    const std::string_view key{ &upper, 1 };
-    for (const auto& [lat, cyr] : kNameLatinToCyrillic)
-    {
-        if (lat == key && lat != "W")
-        {
-            return std::string(cyr);
-        }
-    }
-
-    return "";
-}
-
-
-
 
 std::string OnnxStampRecognizer::fixDecimalDigitArtifacts(const std::string& rawText)
 {
@@ -1083,16 +1122,16 @@ bool OnnxStampRecognizer::isStopWord(const std::string& s)
     // Короткие одиночные заголовки графы «Дата» (проверяем только короткие строки, чтобы не задеть обычные слова)
     if(s.size() <= 10)
     {
-        if(s.find("Дата") != std::string::npos ||
+        if(s.find("Дата") != std::string::npos  ||
             s.find("Цата") != std::string::npos ||
+            s.find("Цота") != std::string::npos ||
             s.find("Лата") != std::string::npos ||
             s.find("Lота") != std::string::npos ||
             s.find("Dота") != std::string::npos ||
             s.find("loma") != std::string::npos ||
             s.find("lomo") != std::string::npos ||
             s.find("Дoma") != std::string::npos ||
-            s.find("Lапо") != std::string::npos ||
-            s == "ата" || s == "Аит" || s == "Лит" || s == "та")
+            s == "ата" || s == "Аит" || s == "Лит")
         {
             return true;
         }
@@ -1149,6 +1188,12 @@ void OnnxStampRecognizer::detectDocumentCode(const std::string& text, pdm::share
 
 
 
+/**
+ * Инициализация выполняется один раз на экземпляр распознавателя.
+ * Здесь загружаются две независимые ONNX-модели и словарь символов:
+ * det.onnx отвечает за координаты текстовых областей, rec.onnx — за символы.
+ * Флаг m_initialized становится true только после успешной подготовки ресурсов.
+ */
 OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
 {
     // Отключаем аппаратные SIMD-оптимизации OpenCV (AVX2/SSE4).
@@ -1214,52 +1259,23 @@ OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
 
 
 
+/**
+ * Подготовка исходного скана к дальнейшему анализу.
+ * Порядок этапов: загрузка серого изображения -> поиск угла штампа ->
+ * чтение DPI -> расчёт и вырезание ROI -> перенос координат угла в ROI ->
+ * нормализация размера -> улучшение контраста/сглаживание -> перевод в BGR.
+ * Возвращаемый bottomRightCorner уже задан относительно bgrMat, а не полного скана.
+ */
 OnnxStampRecognizer::PreparedStamp OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imagePath)
 {
-    Image img{ imagePath };
-    const int fullW{ img.width() };
-    const int fullH{ img.height() };
-    const int channels{ img.channels() };
-    const unsigned char* rawData{ img.get() };
-
-    if(!rawData || fullW <= 0 || fullH <= 0 || (channels != 1 && channels != 3 && channels != 4))
+    const cv::Mat fullGray{ loadGrayImage(imagePath) };
+    if(fullGray.empty())
     {
         return {};
     }
 
-    const int srcType{ (channels == 1) ? CV_8UC1 : (channels == 4 ? CV_8UC4 : CV_8UC3) };
-    const int toGrayCode{ (channels == 1) ? -1
-                                         : (channels == 4 ? cv::COLOR_RGBA2GRAY
-                                                          : cv::COLOR_RGB2GRAY) };
-
-    const cv::Mat srcMat{ fullH, fullW, srcType, const_cast<unsigned char*>(rawData) };
-    cv::Mat fullGray{};
-    if(toGrayCode == -1)
-    {
-        fullGray = srcMat.clone();
-    }
-    else
-    {
-        cv::cvtColor(srcMat, fullGray, toGrayCode);
-    }
-
     const auto cornerOpt{ findStampBottomRightCorner(fullGray) };
-
-    constexpr double kReferenceDpi{ 300.0 };
-    double scaleX{ 1.0 };
-    double scaleY{ 1.0 };
-    QImageReader metadataReader{ QString::fromStdString(imagePath.string()) };
-    const QImage metadataImage{ metadataReader.read() };
-    if(!metadataImage.isNull() &&
-        metadataImage.dotsPerMeterX() > 0 &&
-        metadataImage.dotsPerMeterY() > 0)
-    {
-        constexpr double kMetersPerInch{ 0.0254 };
-        const double dpiX{ metadataImage.dotsPerMeterX() * kMetersPerInch };
-        const double dpiY{ metadataImage.dotsPerMeterY() * kMetersPerInch };
-        scaleX = dpiX / kReferenceDpi;
-        scaleY = dpiY / kReferenceDpi;
-    }
+    const auto [scaleX, scaleY]{ readDpiScale(imagePath) };
 
     constexpr double kCropExpansion{ 1.3 };
     const int cropW{ std::max(1, cvRound(kCropW * scaleX * kCropExpansion)) };
@@ -1322,18 +1338,8 @@ OnnxStampRecognizer::PreparedStamp OnnxStampRecognizer::prepareStampImage(const 
     cv::Mat bgrMat{};
     cv::cvtColor(processed, bgrMat, cv::COLOR_GRAY2BGR);
 
-    if(!m_debugDir.empty())
-    {
-        cv::Mat fullDebugVis{};
-        cv::cvtColor(fullGray, fullDebugVis, cv::COLOR_GRAY2BGR);
-        cv::rectangle(fullDebugVis, cv::Rect(cropX, cropY, safeW, safeH), cv::Scalar(255, 0, 0), 3);
-        if(cornerOpt.has_value())
-        {
-            cv::drawMarker(fullDebugVis, *cornerOpt, cv::Scalar(0, 200, 0), cv::MARKER_CROSS, 80, 6);
-        }
-        const auto outPath{ m_debugDir / ("debug_full_" + imagePath.filename().string()) };
-        cv::imwrite(outPath.string(), fullDebugVis);
-    }
+    saveStampDebugImage(m_debugDir, imagePath, fullGray,
+                        cv::Rect(cropX, cropY, safeW, safeH), cornerOpt);
 
     return PreparedStamp{ std::move(bgrMat), cornerInCrop };
 }
@@ -1341,6 +1347,12 @@ OnnxStampRecognizer::PreparedStamp OnnxStampRecognizer::prepareStampImage(const 
 
 
 
+/**
+ * Первый нейросетевой проход: DBNet ищет, ГДЕ находится текст.
+ * Изображение приводится к размеру входа детектора и нормализуется,
+ * затем m_detNet.forward() выдаёт карту вероятностей. findTextBoxes()
+ * превращает эту карту в геометрические TextBox. Сами строки здесь не читаются.
+ */
 std::vector<OnnxStampRecognizer::TextBox> OnnxStampRecognizer::detectTextBoxes(const cv::Mat& bgrMat)
 {
     // 1. Приводим штамп к фиксированному размеру 1024x1024 и переводим пиксели из [0..255] в [0.0..1.0]
@@ -1378,6 +1390,12 @@ std::vector<OnnxStampRecognizer::TextBox> OnnxStampRecognizer::detectTextBoxes(c
 
 
 
+/**
+ * Второй нейросетевой этап для уже найденных областей.
+ * Для каждого TextBox вырезается изображение строки, после чего recognizeCrop()
+ * запускает rec.onnx и декодирует последовательность символов. Результат
+ * записывается непосредственно в boxes[i].text; координаты и score сохраняются.
+ */
 void OnnxStampRecognizer::recognizeTextBoxes(const cv::Mat& bgrMat, std::vector<TextBox>& boxes)
 {
     qDebug().noquote() << "[OpenCV-DNN] DETECTED BLOCKS (x, y):\n";
@@ -1450,6 +1468,11 @@ std::optional<cv::Point2f> OnnxStampRecognizer::
 
 
 
+/**
+ * Определение формы по вертикальному расстоянию от номера до нижнего угла рамки.
+ * Это не отдельное распознавание изображения: метод классифицирует компоновку
+ * штампа по уже найденным координатам и выбирает дальнейшие правила извлечения.
+ */
 OnnxStampRecognizer::StampFormType OnnxStampRecognizer::detectStampForm(float numY, float cornerY)
 {
     const float distFromBottom{ cornerY - numY };
@@ -1467,6 +1490,12 @@ OnnxStampRecognizer::StampFormType OnnxStampRecognizer::detectStampForm(float nu
 
 
 
+/**
+ * Извлечение графы наименования. Метод рассматривает только боксы в ожидаемой
+ * геометрической области под номером, исправляет типовые OCR-ошибки, отбрасывает
+ * служебные надписи и склеивает подходящие строки сверху вниз. Для Form2a
+ * наименование не извлекается, поскольку в этой форме такой графы нет.
+ */
 void OnnxStampRecognizer::extractProductName(const std::vector<TextBox>& boxes,
                                              const cv::Point2f& numPos,
                                              const cv::Point2f& corner,
@@ -1514,7 +1543,6 @@ void OnnxStampRecognizer::extractProductName(const std::vector<TextBox>& boxes,
             continue;
         }
 
-        // ---> ВСТАВЛЯТЬ СЮДА <---
         // Отсекаем короткие 2-буквенные обрывки без гласных из левой колонки (например, "мв", "пт", "кб")
         if(cleanedPart.size() <= 4)
         {
@@ -1572,6 +1600,12 @@ bool OnnxStampRecognizer::matchKeywordAndExtractTail(const std::string& text,
 
 
 
+/**
+ * Резервный путь чтения цифры из заранее рассчитанной ячейки.
+ * В отличие от обычного прохода, здесь ROI задаётся геометрией штампа/заголовка,
+ * а не DBNet-боксом. Из изображения подавляются линии таблицы, после чего
+ * фрагмент повторно проходит через ту же rec.onnx и parseSheetNumber().
+ */
 int OnnxStampRecognizer::recognizeRegionNumber(const cv::Mat& bgrMat,
                                                const cv::Rect& roi,
                                                int minSizePx,
@@ -1755,13 +1789,18 @@ void OnnxStampRecognizer::findSheetValuesInBoxes(const std::vector<TextBox>& box
 
 
 
+/**
+ * Координатор извлечения нумерации листов.
+ * Последовательность попыток: найти слова-заголовки «Лист»/«Листов» ->
+ * извлечь число из того же или соседнего TextBox -> если значение не найдено,
+ * распознать рассчитанную ячейку напрямую. Конкретные ROI зависят от формы штампа.
+ */
 void OnnxStampRecognizer::extractSheetNumbers(const cv::Mat& bgrMat,
                                               const std::vector<TextBox>& boxes,
                                               const cv::Point2f& corner,
                                               StampFormType formType,
                                               shared::Document& doc)
 {
-    constexpr int kDefaultSheetNumber{ 1 };
     const bool isForm2a{ formType == StampFormType::Form2a };
 
     cv::Point2f sheetHeaderPos{ kUnsetCoord, kUnsetCoord };
@@ -1778,7 +1817,32 @@ void OnnxStampRecognizer::extractSheetNumbers(const cv::Mat& bgrMat,
     // 2. Ищем значения в соседних боксах (снизу для Формы 2/2а или справа для Формы 1)
     findSheetValuesInBoxes(boxes, sheetHeaderPos, totalHeaderPos, isForm2a, sheetFound, totalFound, doc);
 
-    // 3. Прямой дораспознаватель ячеек через m_recNet по координатам относительно corner
+    recognizeSheetNumbersInCells(bgrMat, corner, formType,
+                                 sheetHeaderPos, totalHeaderPos,
+                                 sheetFound, totalFound, doc);
+}
+
+
+
+
+/**
+ * Прямое распознавание ячеек — резерв после анализа текстовых боксов.
+ * Здесь вычисляются прямоугольники для цифр с учётом Form1/Form2/Form2a.
+ * Каждая область передаётся в recognizeRegionNumber(), который повторно
+ * использует rec.onnx. Для Form2a в конце предусмотрено значение по умолчанию.
+ */
+void OnnxStampRecognizer::recognizeSheetNumbersInCells(const cv::Mat& bgrMat,
+                                                       const cv::Point2f& corner,
+                                                       StampFormType formType,
+                                                       const cv::Point2f& sheetHeaderPos,
+                                                       const cv::Point2f& totalHeaderPos,
+                                                       bool sheetFound,
+                                                       bool totalFound,
+                                                       shared::Document& doc)
+{
+    constexpr int kDefaultSheetNumber{ 1 };
+    const bool isForm2a{ formType == StampFormType::Form2a };
+
     if(!sheetFound)
     {
         if(isForm2a)
@@ -1859,6 +1923,11 @@ void OnnxStampRecognizer::extractSheetNumbers(const cv::Mat& bgrMat,
 
 
 
+/**
+ * Главный сценарий одного распознавания. Метод оркестрирует этапы, но делегирует
+ * обработку изображения, работу нейросетей и разбор строк специализированным
+ * функциям класса. Порядок вызовов ниже является фактическим порядком конвейера.
+ */
 std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesystem::path& imagePath)
 {
     if(!m_initialized)
@@ -1872,32 +1941,39 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
         qDebug().noquote() << "[OpenCV-DNN] 1. Start recognizing:"
                            << QString::fromStdString(imagePath.string());
 
+        // Этап 1. Подготовить единый кроп штампа и координаты его правого нижнего угла.
         const auto prepared{ prepareStampImage(imagePath) };
         if(prepared.bgrMat.empty())
         {
             return std::nullopt;
         }
 
+        // Этап 2. DBNet находит только области текста; пустой результат останавливает конвейер.
         auto boxes{ detectTextBoxes(prepared.bgrMat) };
         if(boxes.empty())
         {
             return std::nullopt;
         }
 
+        // Этап 3. rec.onnx читает содержимое каждой области; строки сохраняются в boxes[].text.
         recognizeTextBoxes(prepared.bgrMat, boxes);
 
+        // Этап 4. Создать результат с начальными значениями нумерации листов.
         shared::Document doc{};
         doc.sheet = 1;
         doc.totalSheets = 1;
 
+        // Этап 5. Найти основной децимальный номер и извлечь код документа.
         const auto numPos{ locateDecimalNumber(boxes, prepared.bottomRightCorner, doc) };
         if(!numPos.has_value())
         {
             return std::nullopt;
         }
 
+        // Этап 6. По положению номера определить компоновку основной надписи.
         const StampFormType formType{ detectStampForm(numPos->y, prepared.bottomRightCorner.y) };
 
+        // Этапы 7–8. Извлечь наименование и нумерацию листов с учётом выбранной формы.
         extractProductName(boxes, *numPos, prepared.bottomRightCorner, formType, doc);
         extractSheetNumbers(prepared.bgrMat, boxes, prepared.bottomRightCorner, formType, doc);
 
@@ -1909,6 +1985,7 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
                    .arg(doc.sheet)
                    .arg(doc.totalSheets);
 
+        // Этап 9. Номер обязателен всегда; наименование обязательно только для Form1/Form2.
         if(doc.number.empty() || (formType != StampFormType::Form2a && doc.name.empty()))
         {
             qWarning().noquote() << "OnnxStampRecognizer::recognize: Failed to parse text.";
