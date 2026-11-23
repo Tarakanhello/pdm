@@ -104,11 +104,11 @@ ImageMetadata parseExif(const std::vector<unsigned char>& data, size_t tiffStart
             return std::nullopt;
         }
 
-        return std::optional<std::uint16_t>{ readEndian32(data, pos, littleEndian) };
+        return std::optional<std::uint32_t>{ readEndian32(data, pos, littleEndian) };
 
     } };
 
-    if(read16(tiffStart + 1) != 42)
+    if(read16(tiffStart + 2) != 42)
     {
         return result;
     }
@@ -253,7 +253,7 @@ ImageMetadata parseImageMetadata(const std::vector<unsigned char>& data)
         {
             break;
         }
-        if(marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
+        if(marker == 0x01 || marker == 0xD8 || (marker >= 0xD0 && marker <= 0xD7))
         {
             continue;
         }
