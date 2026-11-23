@@ -390,7 +390,7 @@ void OnnxStampRecognizer::setDebugOutputDir(const std::filesystem::path& debugDi
     }
 }
 
-std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const cv::Mat& fullGray, const std::string& debugFilename)
+std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const cv::Mat& fullGray, [[maybe_unused]] const std::string& debugFilename)
 {
     if(fullGray.empty() || fullGray.type() != CV_8UC1)
     {
@@ -1021,9 +1021,20 @@ std::string OnnxStampRecognizer::fixDecimalDigitArtifacts(const std::string& raw
 
     // 3. Заменяем буквенные двойники цифр строго в пределах цифровой части номера
     const size_t limit{ (afterLastGroup > 0) ? std::min(afterLastGroup, s.size()) : s.size() };
+    size_t digitsSeen{ 0 };
     for (size_t i{ 0 }; i < limit; ++i)
     {
         char& ch{ s[i] };
+        if (std::isdigit(static_cast<unsigned char>(ch)))
+        {
+            ++digitsSeen;
+            continue;
+        }
+        if (afterLastGroup == 0 && digitsSeen >= kStandardDecimalDigits)
+        {
+            break;
+        }
+
         if (ch == ':' || ch == 'I' || ch == 'l' || ch == 'T' || ch == '!')
         {
             ch = '1';
