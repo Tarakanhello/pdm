@@ -25,13 +25,20 @@ private:
     int m_height{};                         ///< Высота изображения в пикселях.
     int m_channels{};                       ///< Количество цветовых каналов (например, 3 для RGB, 4 для RGBA).
 
+    std::optional<double> m_dpiX{};         ///< Горизонтальное разрешение исходного изображения в DPI.
+    std::optional<double> m_dpiY{};         ///< Вертикальное разрешение исходного изображения в DPI.
+
     std::filesystem::path m_sourcePath{};   ///< Исходный путь к файлу (для перезаписи или перезагрузки).
 
 public:
     Image() = default;
 
-    Image(const std::vector<unsigned char>& image, int width, int height, int channels)
+    Image(const std::vector<unsigned char>& image, int width, int height, int channels,
+          std::optional<double> dpiX,
+          std::optional<double> dpiY)
         : m_image{ image }, m_width{ width }, m_height{ height }, m_channels{ channels }
+        , m_dpiX{ dpiX }
+        , m_dpiY{ dpiY }
     {}
 
     /**
@@ -49,6 +56,12 @@ public:
 
     /// @brief Получить количество цветовых каналов.
     int channels()  const noexcept { return m_channels; }
+
+    /// @brief Получить горизонтальное разрешение исходного изображения в DPI, если оно задано.
+    std::optional<double> dpiX() const noexcept { return m_dpiX; }
+
+    /// @brief Получить вертикальное разрешение исходного изображения в DPI, если оно задано.
+    std::optional<double> dpiY() const noexcept { return m_dpiY; }
 
 
 
