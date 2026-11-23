@@ -1538,7 +1538,11 @@ void OnnxStampRecognizer::extractProductName(const std::vector<TextBox>& boxes,
         const bool hasCyrillic{ cleanedPart.find('\xD0') != std::string::npos ||
                                cleanedPart.find('\xD1') != std::string::npos };
 
-        if(!hasCyrillic || cleanedPart.size() < kMinCleanedNameBytes || isStopWord(cleanedPart))
+
+        if(!hasCyrillic                                 ||
+            cleanedPart.size() < kMinCleanedNameBytes   ||
+            (bx < 75.0f && cleanedPart.size() <= 8)     ||
+            isStopWord(cleanedPart))
         {
             continue;
         }
