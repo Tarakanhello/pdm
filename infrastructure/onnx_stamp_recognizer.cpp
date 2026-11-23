@@ -141,7 +141,7 @@ std::vector<StampSegment> extractStampSegments(const cv::Mat& mask, bool horizon
     return segs;
 }
 
-std::optional<int> findStampEdgeByProfile(const std::vector<StampSegment>& segs,
+[[maybe_unused]] std::optional<int> findStampEdgeByProfile(const std::vector<StampSegment>& segs,
                                           int maxCoord,
                                           int minCoord,
                                           int minJump,
@@ -334,9 +334,8 @@ StampLineSegments extractStampLineSegments(const cv::Mat& zone, int searchRight,
     cv::Mat binary{};
     cv::adaptiveThreshold(denoised, binary, 255,
                           cv::ADAPTIVE_THRESH_GAUSSIAN_C,
-                          cv::THRESH_BINARY_INV, 25, 22);
+                          cv::THRESH_BINARY_INV, 25, 24);
 
-    // Обнуляем найденные чёрные полосы сканера на бинарной маске
     if(searchRight < zone.cols - 1)
     {
         binary.colRange(std::max(0, searchRight + 1), zone.cols).setTo(0);
@@ -346,16 +345,25 @@ StampLineSegments extractStampLineSegments(const cv::Mat& zone, int searchRight,
         binary.rowRange(std::max(0, searchBottom + 1), zone.rows).setTo(0);
     }
 
-    constexpr int kHorizClosePx{ 35 };
-    constexpr int kVertClosePx{ 20 };
-    constexpr int kMinHorizSegPx{ 140 };
-    constexpr int kMinVertSegPx{ 35 };
+    // Шаг 1: Уничтожаем мелкие штрихи и зернистую сыпь принтера (куски короче 22 px по горизонтали и 14 px по вертикали)
+    // ДО того, как склеивать разрывы — иначе точки шума сцепятся в ложные линии
+    cv::Mat cleanH{}, cleanV{};
+    cv::morphologyEx(binary, cleanH, cv::MORPH_OPEN,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(22, 1)));
+    cv::morphologyEx(binary, cleanV, cv::MORPH_OPEN,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 14)));
 
+    // Шаг 2: Склеиваем белые проплешины (до 26 px) только в уже выживших реальных линиях
     cv::Mat closedH{}, closedV{};
-    cv::morphologyEx(binary, closedH, cv::MORPH_CLOSE,
-                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kHorizClosePx, 1)));
-    cv::morphologyEx(binary, closedV, cv::MORPH_CLOSE,
-                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, kVertClosePx)));
+    cv::morphologyEx(cleanH, closedH, cv::MORPH_CLOSE,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(26, 1)));
+    cv::morphologyEx(cleanV, closedV, cv::MORPH_CLOSE,
+                     cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 12)));
+
+    // Шаг 3: Отбираем линии рамки (порог 55 px захватывает черту под «Лист» шириной 10 мм,
+    // при этом шум принтера уже отсеян на Шаге 1 ядром 22 px)
+    constexpr int kMinHorizSegPx{ 55 };
+    constexpr int kMinVertSegPx{ 55 };
 
     cv::Mat horizMask{}, vertMask{};
     cv::morphologyEx(closedH, horizMask, cv::MORPH_OPEN,
@@ -401,29 +409,40 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
     const int offsetY{ fullGray.rows - zoneH };
     const cv::Mat zone{ fullGray(cv::Rect(offsetX, offsetY, zoneW, zoneH)) };
 
-    // 2. Адаптивно определяем границы чёрных полей сканера справа и снизу
-    // На реальном чертеже в строке/столбце не бывает > 50% сплошного чёрного цвета;
-    // проверяем полосу до 150 px от края, чтобы перешагнуть белые зазоры у кромки.
-    constexpr int kMaxBorderScanPx{ 150 };
+    // 2. Адаптивно отсекаем чёрные поля сканера только у самой кромки листа:
+    //    как только встретили 6 подряд светлых столбцов/строк — останавливаемся
+    constexpr int kMaxBorderScanPx{ 140 };
     constexpr int kDarkPixelThresh{ 70 };
 
     int searchRight{ zoneW - 1 };
+    int cleanStreakX{ 0 };
     for(int x{ zoneW - 1 }; x > std::max(zoneW / 2, zoneW - kMaxBorderScanPx); --x)
     {
         const int darkPixels{ zoneH - cv::countNonZero(zone.col(x) > kDarkPixelThresh) };
-        if(darkPixels > static_cast<int>(zoneH * 0.50))
+        if(darkPixels > static_cast<int>(zoneH * 0.45))
         {
-            searchRight = x - 6; // отступаем на 6 px внутрь от края тени сканера
+            searchRight = x - 6;
+            cleanStreakX = 0;
+        }
+        else if(++cleanStreakX >= 6 && searchRight < zoneW - 1)
+        {
+            break;
         }
     }
 
     int searchBottom{ zoneH - 1 };
+    int cleanStreakY{ 0 };
     for(int y{ zoneH - 1 }; y > std::max(zoneH / 2, zoneH - kMaxBorderScanPx); --y)
     {
         const int darkPixels{ zoneW - cv::countNonZero(zone.row(y) > kDarkPixelThresh) };
-        if(darkPixels > static_cast<int>(zoneW * 0.50))
+        if(darkPixels > static_cast<int>(zoneW * 0.45))
         {
             searchBottom = y - 6;
+            cleanStreakY = 0;
+        }
+        else if(++cleanStreakY >= 6 && searchBottom < zoneH - 1)
+        {
+            break;
         }
     }
 
@@ -431,102 +450,173 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
     const auto& hSegs{ lineSegments.horizontal };
     const auto& vSegs{ lineSegments.vertical };
 
-    // 5. Сначала определяем нижнюю координату Y.
-    // В нижней части Формы 1 (графа организации) всего 2 вертикальные линии рамки (левая и правая),
-    // поэтому используем minJump = 2 (с запасным minJump = 1).
-    const int minSearchY{ std::max(0, searchBottom - 350) };
-    auto foundY{ findStampEdgeByProfile(vSegs, searchBottom, minSearchY, 2, 2) };
-    if(!foundY.has_value())
-    {
-        foundY = findStampEdgeByProfile(vSegs, searchBottom, minSearchY, 1, 2, 12, 30);
-    }
-
-    if(!foundY.has_value())
-    {
-        return std::nullopt;
-    }
-
-    // 6. Оставляем только горизонтальные линии, лежащие по высоте внутри штампа
-    constexpr int kMaxStampBandHeightPx{ 340 };
-    constexpr int kBottomBandTolPx{ 12 };
-
-    std::vector<StampSegment> stampHSegs{};
-    stampHSegs.reserve(hSegs.size());
-    for(const auto& s : hSegs)
-    {
-        if(s.pos >= (*foundY - kMaxStampBandHeightPx) && s.pos <= (*foundY + kBottomBandTolPx))
+    // Подсчёт уникальных по координате pos линий (с допуском ±8 px, чтобы разрыв/нахлёст не считался дважды)
+    auto countUniqueLinesAt = [](const std::vector<StampSegment>& segs, int coord, int minLength, int minPos, int maxPos) -> int {
+        std::vector<int> positions{};
+        for(const auto& s : segs)
         {
-            stampHSegs.push_back(s);
+            if((s.end - s.start) < minLength || s.pos < minPos || s.pos > maxPos)
+            {
+                continue;
+            }
+            if(s.start <= coord && coord <= s.end)
+            {
+                const bool duplicate{ std::any_of(positions.begin(), positions.end(), [&](int p) {
+                    return std::abs(p - s.pos) <= 8;
+                }) };
+                if(!duplicate)
+                {
+                    positions.push_back(s.pos);
+                }
+            }
+        }
+        return static_cast<int>(positions.size());
+    };
+
+    // Привязка найденного X к точной координате ближайшей вертикальной линии рамки (±15 px)
+    auto snapToVerticalLine = [&vSegs](int rawX) -> int {
+        int snappedX{ rawX };
+        int bestDist{ 16 };
+        for(const auto& v : vSegs)
+        {
+            const int dist{ std::abs(v.pos - rawX) };
+            if(dist < bestDist)
+            {
+                bestDist = dist;
+                snappedX = v.pos;
+            }
+        }
+        return snappedX;
+    };
+
+    // 3. Двигаемся СПРАВА НАЛЕВО по горизонтальным линиям:
+    //    - 3 линии -> 100% внутри штампа (отскакиваем к началу зоны из >= 2 линий);
+    //    - 2 линии -> запоминаем начало (twoLinesStartX);
+    //    - уменьшение (< 2 линий) -> прошли графу «Лист» Формы 2а без нижней линии,
+    //      отскакиваем назад в twoLinesStartX — это правая граница штампа.
+    std::optional<int> foundX{ std::nullopt };
+    std::optional<int> twoLinesStartX{ std::nullopt };
+    constexpr int kMinValidSpanPx{ 5 };
+    const int minHorizY{ std::max(0, searchBottom - 650) }; // 650 высота от нижней границы листа
+
+    for(int x{ searchRight }; x >= zoneW / 4; --x)
+    {
+        const int hCount{ countUniqueLinesAt(hSegs, x, 50, minHorizY, searchBottom) };
+
+        if(hCount >= 3)
+        {
+            const int rawRightX{ twoLinesStartX.value_or(x) };
+            foundX = snapToVerticalLine(rawRightX);
+            break;
+        }
+        else if(hCount == 2)
+        {
+            if(!twoLinesStartX.has_value())
+            {
+                twoLinesStartX = x;
+            }
+        }
+        else
+        {
+            if(twoLinesStartX.has_value())
+            {
+                if((*twoLinesStartX - x) >= kMinValidSpanPx)
+                {
+                    foundX = snapToVerticalLine(*twoLinesStartX);
+                    break;
+                }
+                twoLinesStartX.reset();
+            }
         }
     }
 
-    // Определяем правую координату X по горизонтальным линиям внутри полосы штампа
-    const int minSearchX{ std::max(0, searchRight - 900) };
-    auto foundX{ findStampEdgeByProfile(stampHSegs, searchRight, minSearchX, 2, 3) };
-    if(!foundX.has_value())
+    if(!foundX.has_value() && twoLinesStartX.has_value())
     {
-        foundX = findStampEdgeByProfile(stampHSegs, searchRight, minSearchX, 2, 2);
-    }
-    if(!foundX.has_value())
-    {
-        foundX = findStampEdgeByProfile(stampHSegs, searchRight, minSearchX, 1, 2, 12, 30);
+        foundX = snapToVerticalLine(*twoLinesStartX);
     }
 
-    findStampCornerFallback(hSegs, vSegs, searchBottom, foundX, foundY);
+    // 4. Двигаемся СНИЗУ ВВЕРХ по вертикальным линиям (в пределах ширины штампа левее foundX):
+    //    когда стало >= 4 вертикальных линий — мы вошли в сетку граф штампа снизу.
+    std::optional<int> foundY{ std::nullopt };
+    constexpr int kConfirmStreakPx{ 5 };
 
     if(foundX.has_value())
     {
-        int vertCount{ 0 };
-        int maxVertLen{ 0 };
-        for(const auto& v : vSegs)
-        {
-            if(std::abs(v.pos - *foundX) <= 15)
-            {
-                ++vertCount;
-                maxVertLen = std::max(maxVertLen, v.end - v.start);
-            }
-        }
+        int streakY{ 0 };
+        const int minStampX{ 0 };
+        const int maxStampX{ std::min(searchRight, *foundX + 15) };
 
-        if(maxVertLen < 80 && vertCount < 2)
+        for(int y{ searchBottom }; y >= 20; --y)
         {
-            // Ищем самую правую вертикаль, где есть длинная линия рамки (>= 80 px)
-            int bestX{ -1 };
-            for(const auto& v : vSegs)
+            const int vCount{ countUniqueLinesAt(vSegs, y, 30, minStampX, maxStampX) };
+            if(vCount >= 4)
             {
-                if((v.end - v.start) >= 80 && v.pos <= searchRight && v.pos > bestX)
+                if(++streakY >= kConfirmStreakPx)
                 {
-                    bestX = v.pos;
+                    const int rawBottomY{ y + kConfirmStreakPx - 1 };
+
+                    // Привязываем к точной координате нижней горизонтальной линии штампа (±15 px)
+                    int snappedY{ rawBottomY };
+                    int bestDist{ 18 };
+                    for(const auto& h : hSegs)
+                    {
+                        if((h.end - h.start) >= 50 && std::abs(h.end - *foundX) <= 25)
+                        {
+                            const int dist{ std::abs(h.pos - rawBottomY) };
+                            if(dist < bestDist)
+                            {
+                                bestDist = dist;
+                                snappedY = h.pos;
+                            }
+                        }
+                    }
+                    foundY = snappedY;
+                    break;
                 }
             }
-            if(bestX > 0)
+            else
             {
-                foundX = bestX;
+                streakY = 0;
             }
         }
     }
 
+    // 5. Резервные этапы поиска: сначала профильный поиск findStampEdgeByProfile, затем кластерный fallback
+    if(!foundX.has_value())
+    {
+        foundX = findStampEdgeByProfile(hSegs, searchRight, zoneW / 4, 2, 2);
+    }
+
+    if(!foundY.has_value())
+    {
+        foundY = findStampEdgeByProfile(vSegs, searchBottom, 20, 4, 2);
+    }
+    findStampCornerFallback(hSegs, vSegs, searchBottom, foundX, foundY);
+
+    /*
+    // 6. Сохранение отладочного изображения с линиями и итоговым крестом
     if(!m_debugDir.empty() && !debugFilename.empty())
     {
         cv::Mat linesVis{};
         cv::cvtColor(zone, linesVis, cv::COLOR_GRAY2BGR);
 
-        // 1. Жёлтые линии: границы отсечения чёрных полос сканера (searchRight, searchBottom)
+        // Жёлтые линии: границы отсечения чёрных полос сканера (searchRight, searchBottom)
         cv::line(linesVis, cv::Point(searchRight, 0), cv::Point(searchRight, zoneH - 1), cv::Scalar(0, 255, 255), 1);
         cv::line(linesVis, cv::Point(0, searchBottom), cv::Point(zoneW - 1, searchBottom), cv::Scalar(0, 255, 255), 1);
 
-        // 2. Красные линии: все найденные горизонтальные сегменты (hSegs)
+        // Красные линии: все найденные горизонтальные сегменты (hSegs)
         for(const auto& h : hSegs)
         {
             cv::line(linesVis, cv::Point(h.start, h.pos), cv::Point(h.end, h.pos), cv::Scalar(0, 0, 255), 2);
         }
 
-        // 3. Голубые линии: все найденные вертикальные сегменты (vSegs)
+        // Голубые линии: все найденные вертикальные сегменты (vSegs)
         for(const auto& v : vSegs)
         {
             cv::line(linesVis, cv::Point(v.pos, v.start), cv::Point(v.pos, v.end), cv::Scalar(255, 255, 0), 2);
         }
 
-        // 4. Зелёный крест: итоговое решение (foundX, foundY)
+        // Зелёный крест: итоговое решение (foundX, foundY)
         if(foundX.has_value() && foundY.has_value())
         {
             cv::drawMarker(linesVis, cv::Point(*foundX, *foundY), cv::Scalar(0, 255, 0), cv::MARKER_CROSS, 40, 3);
@@ -535,6 +625,7 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
         const auto outPath{ m_debugDir / ("debug_lines_" + debugFilename) };
         cv::imwrite(outPath.string(), linesVis);
     }
+*/
 
     if(!foundX.has_value() || !foundY.has_value())
     {
@@ -2027,8 +2118,11 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
             return std::nullopt;
         }
 
+        /*
+         // Ранний возврат для тестов
         if(!m_debugDir.empty())
             return std::nullopt;
+        */
 
         // Этап 2. DBNet находит только области текста; пустой результат останавливает конвейер.
         auto boxes{ detectTextBoxes(prepared.bgrMat) };
