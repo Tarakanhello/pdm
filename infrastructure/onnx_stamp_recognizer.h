@@ -485,7 +485,7 @@ private:
          * @return Координаты `(x, y)` правого нижнего угла штампа на полном изображении
          *         или `std::nullopt`, если линии рамки не обнаружены.
          */
-    static std::optional<cv::Point> findStampBottomRightCorner(const cv::Mat& fullGray);
+    std::optional<cv::Point> findStampBottomRightCorner(const cv::Mat& fullGray, const std::string& debugFilename = "");
 
 private:
     // Параметры морфологического поиска правого нижнего угла рамки штампа

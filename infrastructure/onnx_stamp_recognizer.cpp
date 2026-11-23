@@ -382,7 +382,7 @@ void OnnxStampRecognizer::setDebugOutputDir(const std::filesystem::path& debugDi
     }
 }
 
-std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const cv::Mat& fullGray)
+std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const cv::Mat& fullGray, const std::string& debugFilename)
 {
     if(fullGray.empty() || fullGray.type() != CV_8UC1)
     {
@@ -474,30 +474,6 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
 
     findStampCornerFallback(hSegs, vSegs, searchBottom, foundX, foundY);
 
-    // Проверяем, что найденный правый край штампа (foundX) подтверждён вертикальной линией рамки
-    if(foundX.has_value())
-    {
-        const bool hasVertBorder{ std::any_of(vSegs.begin(), vSegs.end(), [&foundX](const StampSegment& v) {
-            return std::abs(v.pos - *foundX) <= 25;
-        }) };
-
-        if(!hasVertBorder)
-        {
-            int bestEndX{ -1 };
-            for(const auto& h : stampHSegs)
-            {
-                if((h.end - h.start) >= 250 && h.end > bestEndX)
-                {
-                    bestEndX = h.end;
-                }
-            }
-            if(bestEndX > 0)
-            {
-                foundX = bestEndX;
-            }
-        }
-    }
-
     if(foundX.has_value())
     {
         int vertCount{ 0 };
@@ -527,6 +503,37 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
                 foundX = bestX;
             }
         }
+    }
+
+    if(!m_debugDir.empty() && !debugFilename.empty())
+    {
+        cv::Mat linesVis{};
+        cv::cvtColor(zone, linesVis, cv::COLOR_GRAY2BGR);
+
+        // 1. Жёлтые линии: границы отсечения чёрных полос сканера (searchRight, searchBottom)
+        cv::line(linesVis, cv::Point(searchRight, 0), cv::Point(searchRight, zoneH - 1), cv::Scalar(0, 255, 255), 1);
+        cv::line(linesVis, cv::Point(0, searchBottom), cv::Point(zoneW - 1, searchBottom), cv::Scalar(0, 255, 255), 1);
+
+        // 2. Красные линии: все найденные горизонтальные сегменты (hSegs)
+        for(const auto& h : hSegs)
+        {
+            cv::line(linesVis, cv::Point(h.start, h.pos), cv::Point(h.end, h.pos), cv::Scalar(0, 0, 255), 2);
+        }
+
+        // 3. Голубые линии: все найденные вертикальные сегменты (vSegs)
+        for(const auto& v : vSegs)
+        {
+            cv::line(linesVis, cv::Point(v.pos, v.start), cv::Point(v.pos, v.end), cv::Scalar(255, 255, 0), 2);
+        }
+
+        // 4. Зелёный крест: итоговое решение (foundX, foundY)
+        if(foundX.has_value() && foundY.has_value())
+        {
+            cv::drawMarker(linesVis, cv::Point(*foundX, *foundY), cv::Scalar(0, 255, 0), cv::MARKER_CROSS, 40, 3);
+        }
+
+        const auto outPath{ m_debugDir / ("debug_lines_" + debugFilename) };
+        cv::imwrite(outPath.string(), linesVis);
     }
 
     if(!foundX.has_value() || !foundY.has_value())
@@ -1342,7 +1349,7 @@ OnnxStampRecognizer::PreparedStamp OnnxStampRecognizer::prepareStampImage(const 
         return {};
     }
 
-    const auto cornerOpt{ findStampBottomRightCorner(fullGray) };
+    const auto cornerOpt{ findStampBottomRightCorner(fullGray, imagePath.filename().string()) };
     const auto [scaleX, scaleY]{ readDpiScale(imagePath) };
 
     constexpr double kCropExpansion{ 1.3 };
@@ -2019,6 +2026,9 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
         {
             return std::nullopt;
         }
+
+        if(!m_debugDir.empty())
+            return std::nullopt;
 
         // Этап 2. DBNet находит только области текста; пустой результат останавливает конвейер.
         auto boxes{ detectTextBoxes(prepared.bgrMat) };
