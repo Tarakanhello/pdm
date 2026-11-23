@@ -628,10 +628,12 @@ private:
     constexpr static size_t kUtf8CyrillicCharBytes{ 2 };   ///< Размер одной кириллической буквы в кодировке UTF-8.
 
     // Соответствие хвостов номера кодам конструкторских документов (включая типовые ошибки OCR)
-    constexpr static std::array<std::pair<std::string_view, pdm::shared::DocumentTypeCode>, 9> kTrailingDocCodes{ {
+    constexpr static std::array<std::pair<std::string_view, pdm::shared::DocumentTypeCode>, 11> kTrailingDocCodes{ {
         { "СБ", pdm::shared::DocumentTypeCode::AssemblyDrawing },
         { "CB", pdm::shared::DocumentTypeCode::AssemblyDrawing },
         { "C5", pdm::shared::DocumentTypeCode::AssemblyDrawing },
+        { "С5", pdm::shared::DocumentTypeCode::AssemblyDrawing },
+        { "С6", pdm::shared::DocumentTypeCode::AssemblyDrawing },
         { "C6", pdm::shared::DocumentTypeCode::AssemblyDrawing },
         { "C8", pdm::shared::DocumentTypeCode::AssemblyDrawing },
         { "С8", pdm::shared::DocumentTypeCode::AssemblyDrawing },
@@ -669,6 +671,10 @@ private:
         { "8zе3д", "Въезд" },
         { "8ze3д", "Въезд" },
         { "Въе3д", "Въезд" },
+        { "Вzе3д", "Въезд" },
+        { "Вze3д", "Въезд" },
+        { "Вzе3d", "Въезд" },
+        { "Вze3d", "Въезд" },
         { "инбентарный", "инвентарный" },
         { "инбентариый", "инвентарный" },
         { "инвентариый", "инвентарный" },
@@ -688,6 +694,9 @@ private:
         { "Настия", "Настил" },
         { "настия", "настил" },
         { "палудный", "палубный" },
+        { "Стоика", "Стойка" },
+        { "tтоика", "Стойка" },
+        { "tтойка", "Стойка" },
         { "Стоика", "Стойка" }
     });
 };

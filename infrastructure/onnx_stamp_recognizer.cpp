@@ -314,37 +314,42 @@ void findStampCornerFallback(const std::vector<StampSegment>& hSegs,
 
 }
 
+
+
+
 struct StampLineSegments
 {
     std::vector<StampSegment> horizontal{};
     std::vector<StampSegment> vertical{};
 };
 
+
+
+
 StampLineSegments extractStampLineSegments(const cv::Mat& zone, int searchRight, int searchBottom)
 {
-    // 3. Шумоподавление, адаптивная бинаризация бледных линий, закрытие разрывов и разделение осей
     cv::Mat denoised{};
     cv::medianBlur(zone, denoised, 3);
 
     cv::Mat binary{};
     cv::adaptiveThreshold(denoised, binary, 255,
                           cv::ADAPTIVE_THRESH_GAUSSIAN_C,
-                          cv::THRESH_BINARY_INV, 25, 20);
+                          cv::THRESH_BINARY_INV, 25, 22);
 
     // Обнуляем найденные чёрные полосы сканера на бинарной маске
     if(searchRight < zone.cols - 1)
     {
-        binary.colRange(searchRight + 1, zone.cols).setTo(0);
+        binary.colRange(std::max(0, searchRight + 1), zone.cols).setTo(0);
     }
     if(searchBottom < zone.rows - 1)
     {
-        binary.rowRange(searchBottom + 1, zone.rows).setTo(0);
+        binary.rowRange(std::max(0, searchBottom + 1), zone.rows).setTo(0);
     }
 
     constexpr int kHorizClosePx{ 35 };
     constexpr int kVertClosePx{ 20 };
-    constexpr int kMinHorizSegPx{ 85 };
-    constexpr int kMinVertSegPx{ 32 };
+    constexpr int kMinHorizSegPx{ 140 };
+    constexpr int kMinVertSegPx{ 35 };
 
     cv::Mat closedH{}, closedV{};
     cv::morphologyEx(binary, closedH, cv::MORPH_CLOSE,
@@ -358,10 +363,8 @@ StampLineSegments extractStampLineSegments(const cv::Mat& zone, int searchRight,
     cv::morphologyEx(closedV, vertMask, cv::MORPH_OPEN,
                      cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, kMinVertSegPx)));
 
-    // 4. Извлекаем уникальные горизонтальные и вертикальные отрезки через связные компоненты
     const auto hSegs{ extractStampSegments(horizMask, true, kMinHorizSegPx) };
     const auto vSegs{ extractStampSegments(vertMask, false, kMinVertSegPx) };
-
 
     return { hSegs, vSegs };
 }
@@ -399,28 +402,29 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
     const cv::Mat zone{ fullGray(cv::Rect(offsetX, offsetY, zoneW, zoneH)) };
 
     // 2. Адаптивно определяем границы чёрных полей сканера справа и снизу
+    // На реальном чертеже в строке/столбце не бывает > 50% сплошного чёрного цвета;
+    // проверяем полосу до 150 px от края, чтобы перешагнуть белые зазоры у кромки.
+    constexpr int kMaxBorderScanPx{ 150 };
+    constexpr int kDarkPixelThresh{ 70 };
+
     int searchRight{ zoneW - 1 };
-    while(searchRight > zoneW / 2)
+    for(int x{ zoneW - 1 }; x > std::max(zoneW / 2, zoneW - kMaxBorderScanPx); --x)
     {
-        const cv::Mat col{ zone.col(searchRight) };
-        const int darkPixels{ zoneH - cv::countNonZero(col > 50) };
-        if(darkPixels < static_cast<int>(zoneH * 0.85))
+        const int darkPixels{ zoneH - cv::countNonZero(zone.col(x) > kDarkPixelThresh) };
+        if(darkPixels > static_cast<int>(zoneH * 0.50))
         {
-            break;
+            searchRight = x - 6; // отступаем на 6 px внутрь от края тени сканера
         }
-        --searchRight;
     }
 
     int searchBottom{ zoneH - 1 };
-    while(searchBottom > zoneH / 2)
+    for(int y{ zoneH - 1 }; y > std::max(zoneH / 2, zoneH - kMaxBorderScanPx); --y)
     {
-        const cv::Mat row{ zone.row(searchBottom) };
-        const int darkPixels{ zoneW - cv::countNonZero(row > 50) };
-        if(darkPixels < static_cast<int>(zoneW * 0.85))
+        const int darkPixels{ zoneW - cv::countNonZero(zone.row(y) > kDarkPixelThresh) };
+        if(darkPixels > static_cast<int>(zoneW * 0.50))
         {
-            break;
+            searchBottom = y - 6;
         }
-        --searchBottom;
     }
 
     const StampLineSegments lineSegments{ extractStampLineSegments(zone, searchRight, searchBottom) };
@@ -469,6 +473,61 @@ std::optional<cv::Point> OnnxStampRecognizer::findStampBottomRightCorner(const c
     }
 
     findStampCornerFallback(hSegs, vSegs, searchBottom, foundX, foundY);
+
+    // Проверяем, что найденный правый край штампа (foundX) подтверждён вертикальной линией рамки
+    if(foundX.has_value())
+    {
+        const bool hasVertBorder{ std::any_of(vSegs.begin(), vSegs.end(), [&foundX](const StampSegment& v) {
+            return std::abs(v.pos - *foundX) <= 25;
+        }) };
+
+        if(!hasVertBorder)
+        {
+            int bestEndX{ -1 };
+            for(const auto& h : stampHSegs)
+            {
+                if((h.end - h.start) >= 250 && h.end > bestEndX)
+                {
+                    bestEndX = h.end;
+                }
+            }
+            if(bestEndX > 0)
+            {
+                foundX = bestEndX;
+            }
+        }
+    }
+
+    if(foundX.has_value())
+    {
+        int vertCount{ 0 };
+        int maxVertLen{ 0 };
+        for(const auto& v : vSegs)
+        {
+            if(std::abs(v.pos - *foundX) <= 15)
+            {
+                ++vertCount;
+                maxVertLen = std::max(maxVertLen, v.end - v.start);
+            }
+        }
+
+        if(maxVertLen < 80 && vertCount < 2)
+        {
+            // Ищем самую правую вертикаль, где есть длинная линия рамки (>= 80 px)
+            int bestX{ -1 };
+            for(const auto& v : vSegs)
+            {
+                if((v.end - v.start) >= 80 && v.pos <= searchRight && v.pos > bestX)
+                {
+                    bestX = v.pos;
+                }
+            }
+            if(bestX > 0)
+            {
+                foundX = bestX;
+            }
+        }
+    }
 
     if(!foundX.has_value() || !foundY.has_value())
     {
@@ -609,15 +668,15 @@ std::vector<cv::Point2f> OnnxStampRecognizer::orderPointsClockwise(std::vector<c
 
 cv::Mat OnnxStampRecognizer::getRotateCropImage(const cv::Mat& src, const std::vector<cv::Point2f>& box)
 {
-    // На чертежах текст в штампе горизонтален, поэтому используем быстрый прямой прямоугольник
-    // вместо перспективного поворота (warpPerspective), чтобы не размывать мелкие шрифты
     cv::Rect rect{ cv::boundingRect(box) };
 
-    // Добавляем асимметричные отступы (35 px слева, 16 px справа) для захвата первых букв ("Б", "О", "Щ")
-    // и ограничиваем координаты размерами исходной матрицы во избежание выхода за пределы памяти
+    // Для широких блоков в верхней половине штампа (децимальный номер) даём увеличенный запас справа (36 px),
+    // чтобы не обрезать тонкие литеры исполнения ("Г", "А", "Б") или код документа ("СБ") на краю бокса DBNet
+    const int padRight{ (rect.width > 220 && rect.y < 280) ? 36 : kCropPadRightPx };
+
     int x1{ std::max(0, rect.x - kCropPadLeftPx) };
     int y1{ std::max(0, rect.y - kCropPadTopPx) };
-    int x2{ std::min(src.cols, rect.x + rect.width + kCropPadRightPx) };
+    int x2{ std::min(src.cols, rect.x + rect.width + padRight) };
     int y2{ std::min(src.rows, rect.y + rect.height + kCropPadBottomPx) };
 
     if(x2 <= x1 || y2 <= y1)
@@ -625,8 +684,6 @@ cv::Mat OnnxStampRecognizer::getRotateCropImage(const cv::Mat& src, const std::v
         return {};
     }
 
-    // Вызываем .clone(), чтобы скопировать фрагмент в непрерывный буфер памяти
-    // (оператор () в OpenCV возвращает только ссылку на исходную матрицу src)
     return src(cv::Rect(x1, y1, x2 - x1, y2 - y1)).clone();
 }
 
@@ -791,7 +848,18 @@ std::string OnnxStampRecognizer::cleanRussianName(std::string s)
         replaceAll(s, typo, fixed);
     }
 
-    trimInPlace(s, ".,- |\\/[]");
+    // Заменяем цифру '3' между кириллическими буквами на 'з' (частая ошибка OCR: "Въе3д" -> "Въезд")
+    for(size_t i{ 2 }; i + 2 < s.size(); ++i)
+    {
+        if(s[i] == '3' &&
+            static_cast<unsigned char>(s[i - 2]) >= 0xD0 &&
+            static_cast<unsigned char>(s[i + 1]) >= 0xD0)
+        {
+            s.replace(i, 1, "з");
+        }
+    }
+
+    trimInPlace(s, ".,:;!?*- |\\/[]\"<>");
 
     // Отсекаем прилипший к вертикальной линии рамки артефакт ('0', '1') в конце кириллического слова
     while (s.size() > 4 && (s.back() == '0' || s.back() == '1'))
@@ -908,7 +976,7 @@ pdm::shared::DocumentTypeCode OnnxStampRecognizer::extractTrailingDocCode(std::s
 
 OnnxStampRecognizer::ParsedNumberInfo OnnxStampRecognizer::parseDecimalAndCode(const std::string& rawText)
 {
-    static const std::regex kBaseNumRegex{ R"((\d{3}\s*\.\s*\d{2}\s*\.\s*\d{2}\s*\.\s*\d{1,2}\s*\.\s*\d{3}))" };
+    static const std::regex kBaseNumRegex{ R"((\d{3}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2}\s*\.\s*\d{3}))" };
     static const std::regex kCompactNumRegex{ R"(([\d\.\s]{12,18}))" };
     static const std::regex kWhitespaceRegex{ R"(\s+)" };
 
@@ -1131,7 +1199,7 @@ bool OnnxStampRecognizer::isStopWord(const std::string& s)
             s.find("loma") != std::string::npos ||
             s.find("lomo") != std::string::npos ||
             s.find("Дoma") != std::string::npos ||
-            s == "ата" || s == "Аит" || s == "Лит")
+            s == "ит" || s == "ата" || s == "Аит" || s == "Лит")
         {
             return true;
         }
@@ -1512,7 +1580,7 @@ void OnnxStampRecognizer::extractProductName(const std::vector<TextBox>& boxes,
     // справа — колонкой Лит/Масса/Масштаб (corner.x - 65 мм),
     // сверху — строкой децимального номера, снизу — нижней линией рамки (corner.y)
     const float minX{ numPos.x - kNameLeftFromNumPx };
-    const float maxX{ corner.x - kStampRightColsWidthPx };
+    const float maxX{ std::min(corner.x - kStampRightColsWidthPx, numPos.x + 300.0f) };
     const float minY{ numPos.y + kNameSearchTopOffsetPx };
     const float maxY{ std::min(numPos.y + kNameMaxHeightFromNumPx, corner.y - kStampBottomEdgeTolPx) };
 
@@ -1539,9 +1607,9 @@ void OnnxStampRecognizer::extractProductName(const std::vector<TextBox>& boxes,
                                cleanedPart.find('\xD1') != std::string::npos };
 
 
-        if(!hasCyrillic                                 ||
-            cleanedPart.size() < kMinCleanedNameBytes   ||
-            (bx < 75.0f && cleanedPart.size() <= 8)     ||
+        if(!hasCyrillic                                               ||
+            cleanedPart.size() < kMinCleanedNameBytes                 ||
+            ((numPos.x - bx) > 220.0f && cleanedPart.size() <= 8)     ||
             isStopWord(cleanedPart))
         {
             continue;

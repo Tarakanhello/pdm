@@ -39,12 +39,20 @@ std::string Rename::buildNewName(const shared::Document& doc, const std::filesys
     // Если листов больше 1, добавляем " лN", перед расширением
     std::string pageSuffix{ (doc.totalSheets > 1) ? (" л" + std::to_string(page)) : "" };
 
-    return std::format("{}{} {}{}{}",
-                       doc.number,
-                       shared::DocumentTypeCodeToString(doc.code),
-                       doc.name,
-                       pageSuffix,
-                       oldPath.extension().string());
+    std::string rawName{ std::format("{}{} {}{}{}",
+                                    doc.number,
+                                    shared::DocumentTypeCodeToString(doc.code),
+                                    doc.name,
+                                    pageSuffix,
+                                    oldPath.extension().string()) };
+
+    // Удаляем символы, запрещённые в именах файлов Windows
+    std::erase_if(rawName, [](char c) {
+        return c == '\\' || c == '/' || c == ':' || c == '*' ||
+               c == '?'  || c == '"' || c == '<' || c == '>' || c == '|';
+    });
+
+    return rawName;
 }
 
 
