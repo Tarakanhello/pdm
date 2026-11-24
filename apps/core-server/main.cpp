@@ -3,6 +3,7 @@
 
 #include "build_core.h"
 #include "job_params.h"
+#include "diagnosnostic_sink.h"
 
 #include "rename_keys.h" // Включаем только ключи, не включая сам модуль!
 
@@ -25,7 +26,12 @@ int main()
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8); // Переключаем консоль в UTF-8
 #endif
-    std::cout << "=== Run PDM System ===\n";
+
+    auto& logger{ pdm::shared::diagnostic::Logger::instance() };
+
+    logger.init("C:/Users/TarakanovVV/Downloads/someTestFiles/scans");
+
+    logger.log("=== Run PDM System ===\n");
 
     // 1. Создаем Ядро
     auto core{ pdm::composition::BuildCore() };
@@ -39,7 +45,7 @@ int main()
     // 3. Просим ядро запустить модуль по его ID
     core->runModule("rename", params);
 
-    std::cout << "=== Close PDM System ===\n";
+    logger.log("=== Close PDM System ===\n");
 
     return 0;
 }

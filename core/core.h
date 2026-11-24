@@ -10,6 +10,8 @@
 #include "imodule.h"
 #include "job_params.h"
 
+#include "diagnosnostic_sink.h"
+
 namespace pdm
 {
     /**
@@ -23,6 +25,8 @@ namespace pdm
      */
     class Core final
     {
+        shared::diagnostic::Logger& m_logger{ shared::diagnostic::Logger::instance() };
+
         /**
          * @brief Реестр (хранилище) всех зарегистрированных модулей.
          *

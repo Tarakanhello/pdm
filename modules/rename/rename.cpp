@@ -59,12 +59,12 @@ std::string Rename::buildNewName(const shared::Document& doc, const std::filesys
 
 void Rename::execute(const shared::JobParams& params)
 {
-    std::cout << "[RenameModule] Module runs and ready to work!\n";
+    m_logger.log("[RenameModule] Module runs and ready to work!\n");
 
     // Проверяем, передало ли ядро нужные пути
     if(!params.has(rename::keys::scansFolder))
     {
-        std::cerr << "[RenameModule] Error: paths ways has not found!\n";
+        m_logger.log("[RenameModule] Error: paths ways has not found!\n");
         return;
     }
 
@@ -78,11 +78,11 @@ void Rename::execute(const shared::JobParams& params)
     }
     catch(const std::exception& e)
     {
-        std::cerr << e.what() << '\n';
+        m_logger.log(std::format("{}\n",e.what()));
         return;
     }
 
-    std::cout << "[RenameModule] Module end work!\n";
+    m_logger.log("[RenameModule] Module end work!\n");
 }
 
 
@@ -234,10 +234,10 @@ void Rename::performRename(const std::vector<std::filesystem::path>& scanFiles,
         }
     }
 
-    std::cout << "\n=== Summary ===\n";
-    std::cout << "Renamed: " << state.successCount << "\n";
-    std::cout << "Errors:  " << state.errorCount << "\n";
-    std::cout << "Log saved to: " << logPath << "\n";
+    m_logger.log("\n=== Summary ===\n");
+    m_logger.log(std::format("Renamed: {}\n", state.successCount));
+    m_logger.log(std::format("Errors:  {}\n", state.errorCount));
+    m_logger.log(std::format("Log saved to: {}\n", logPath.string()));
 }
 
 

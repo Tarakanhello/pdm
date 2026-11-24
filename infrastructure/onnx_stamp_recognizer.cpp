@@ -21,11 +21,6 @@
 
 #include "image.h"
 
-#include <QDebug>
-#include <QImage>
-#include <QImageReader>
-#include <QString>
-
 
 namespace pdm::infrastructure
 {
@@ -33,9 +28,11 @@ namespace pdm::infrastructure
 namespace
 {
 
-cv::Mat loadGrayImage(const std::filesystem::path& imagePath)
+shared::diagnostic::Logger& m_logger{ shared::diagnostic::Logger::instance() };
+
+
+cv::Mat loadGrayImage(const Image& img)
 {
-    Image img{ imagePath };
     const int fullW{ img.width() };
     const int fullH{ img.height() };
     const int channels{ img.channels() };
@@ -65,27 +62,6 @@ cv::Mat loadGrayImage(const std::filesystem::path& imagePath)
     return fullGray;
 }
 
-std::pair<double, double> readDpiScale(const std::filesystem::path& imagePath)
-{
-    constexpr double kReferenceDpi{ 300.0 };
-    constexpr double kMetersPerInch{ 0.0254 };
-
-    double scaleX{ 1.0 };
-    double scaleY{ 1.0 };
-    QImageReader metadataReader{ QString::fromStdString(imagePath.string()) };
-    const QImage metadataImage{ metadataReader.read() };
-    if(!metadataImage.isNull() &&
-        metadataImage.dotsPerMeterX() > 0 &&
-        metadataImage.dotsPerMeterY() > 0)
-    {
-        const double dpiX{ metadataImage.dotsPerMeterX() * kMetersPerInch };
-        const double dpiY{ metadataImage.dotsPerMeterY() * kMetersPerInch };
-        scaleX = dpiX / kReferenceDpi;
-        scaleY = dpiY / kReferenceDpi;
-    }
-
-    return { scaleX, scaleY };
-}
 
 void saveStampDebugImage(const std::filesystem::path& debugDir,
                          const std::filesystem::path& imagePath,
@@ -669,9 +645,28 @@ std::string OnnxStampRecognizer::normalizeExecutionSuffix(std::string_view rawSu
     // Если это одиночная кириллическая буква в UTF-8 (2 байта) — приводим к заглавному регистру (например, 'г' -> 'Г')
     if (rawSuffix.size() == kUtf8CyrillicCharBytes && (rawSuffix[0] == '\xD0' || rawSuffix[0] == '\xD1'))
     {
-        return QString::fromUtf8(rawSuffix.data(), static_cast<qsizetype>(rawSuffix.size()))
-        .toUpper()
-            .toStdString();
+        std::string res(rawSuffix.data(), rawSuffix.size());
+        const auto b0{ static_cast<unsigned char>(res[0]) };
+        const auto b1{ static_cast<unsigned char>(res[1]) };
+
+        if (b0 == 0xD0 && b1 >= 0xB0 && b1 <= 0xBF)
+        {
+            // 'а' (D0 B0) .. 'п' (D0 BF) -> 'А' (D0 90) .. 'П' (D0 9F)
+            res[1] = static_cast<char>(b1 - 0x20);
+        }
+        else if (b0 == 0xD1 && b1 >= 0x80 && b1 <= 0x8F)
+        {
+            // 'р' (D1 80) .. 'я' (D1 8F) -> 'Р' (D0 A0) .. 'Я' (D0 AF)
+            res[0] = '\xD0';
+            res[1] = static_cast<char>(b1 + 0x20);
+        }
+        else if (b0 == 0xD1 && b1 == 0x91)
+        {
+            // 'ё' (D1 91) -> 'Ё' (D0 81)
+            res[0] = '\xD0';
+            res[1] = '\x81';
+        }
+        return res;
     }
 
     // Поддержка суффиксов вида "/1", "/2" (в имени файла Windows символ '/' заменяется на '-')
@@ -1383,8 +1378,7 @@ OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
 
     try
     {
-        qDebug().noquote() << "[OpenCV-DNN] Initializing models from:"
-                           << QString::fromStdString(modelsDir.string());
+        m_logger.log(std::format("[OpenCV-DNN] Initializing models from: {}\n", modelsDir.string()));
 
         // Загружаем только детектор (DBNet) и распознаватель (PP-OCRv5).
         // Классификатор угла (cls.onnx) не используется, так как сканы чертежей имеют фиксированную ориентацию
@@ -1394,7 +1388,7 @@ OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
         std::ifstream dictFile(modelsDir / "cyrillic_dict.txt");
         if(!dictFile.is_open())
         {
-            std::cerr << "[OpenCV-DNN] ERROR: Cannot open cyrillic_dict.txt!\n" << std::flush;
+            m_logger.log("[OpenCV-DNN] ERROR: Cannot open cyrillic_dict.txt!\n");
             return;
         }
 
@@ -1418,17 +1412,17 @@ OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
         }
         m_keys.push_back(" ");
 
-        qDebug() << "[OpenCV-DNN] Loaded dictionary keys:" << m_keys.size();
+        m_logger.log(std::format("[OpenCV-DNN] Loaded dictionary keys: {}\n", m_keys.size()));
         m_initialized = (!m_detNet.empty() && !m_recNet.empty());
 
         if(m_initialized)
         {
-            qDebug().noquote() << "[OpenCV-DNN] ONNX models loaded successfully!\n";
+            m_logger.log("[OpenCV-DNN] ONNX models loaded successfully!\n");
         }
     }
     catch (const std::exception& e)
     {
-        std::cerr << "[OpenCV-DNN] Init exception: " << e.what() << "\n" << std::flush;
+        m_logger.log(std::format("[OpenCV-DNN] Init exception: {}\n", e.what()));
         m_initialized = false;
     }
 }
@@ -1445,14 +1439,25 @@ OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
  */
 OnnxStampRecognizer::PreparedStamp OnnxStampRecognizer::prepareStampImage(const std::filesystem::path& imagePath)
 {
+    Image image{ imagePath };
+    constexpr double kReferenceDpi{ 300.0 };
+
     const cv::Mat fullGray{ loadGrayImage(imagePath) };
     if(fullGray.empty())
     {
         return {};
     }
 
+    double scaleX{ 1.0 };
+    double scaleY{ 1.0 };
+
+    if(image.dpiX().has_value() && image.dpiY().has_value())
+    {
+        scaleX = *image.dpiX() / kReferenceDpi;
+        scaleY = *image.dpiY() / kReferenceDpi;
+    }
+
     const auto cornerOpt{ findStampBottomRightCorner(fullGray, imagePath.filename().string()) };
-    const auto [scaleX, scaleY]{ readDpiScale(imagePath) };
 
     constexpr double kCropExpansion{ 1.3 };
     const int cropW{ std::max(1, cvRound(kCropW * scaleX * kCropExpansion)) };
@@ -1476,8 +1481,7 @@ OnnxStampRecognizer::PreparedStamp OnnxStampRecognizer::prepareStampImage(const 
     }
     else
     {
-        qWarning().noquote() << "[OpenCV-DNN] Stamp frame corner not found, using fallback crop for:"
-                             << QString::fromStdString(imagePath.filename().string());
+        m_logger.log(std::format("[OpenCV-DNN] Stamp frame corner not found, using fallback crop for: {}\n", imagePath.filename().string()));
     }
 
     const int safeW{ std::min(cropW, scanW - cropX) };
@@ -1552,7 +1556,7 @@ std::vector<OnnxStampRecognizer::TextBox> OnnxStampRecognizer::detectTextBoxes(c
     cv::Mat detOut{ m_detNet.forward() };
     if(detOut.empty() || detOut.total() < static_cast<size_t>(kDetInputHeight) * kDetInputWidth)
     {
-        std::cerr << "[OpenCV-DNN] ERROR: Invalid detOut shape!\n" << std::flush;
+        m_logger.log("[OpenCV-DNN] ERROR: Invalid detOut shape!\n");
         return {};
     }
 
@@ -1575,7 +1579,7 @@ std::vector<OnnxStampRecognizer::TextBox> OnnxStampRecognizer::detectTextBoxes(c
  */
 void OnnxStampRecognizer::recognizeTextBoxes(const cv::Mat& bgrMat, std::vector<TextBox>& boxes)
 {
-    qDebug().noquote() << "[OpenCV-DNN] DETECTED BLOCKS (x, y):\n";
+    m_logger.log("[OpenCV-DNN] DETECTED BLOCKS (x, y):\n");
 
     // Проходим по всем найденным рамкам: вырезаем каждую строку и прогоняем через модель распознавания
     for(auto& tb : boxes)
@@ -1586,13 +1590,13 @@ void OnnxStampRecognizer::recognizeTextBoxes(const cv::Mat& bgrMat, std::vector<
         // Логируем координаты (x, y) и распознанный текст для отладки пространственной привязки граф
         if(!tb.text.empty())
         {
-            qDebug().noquote() << QString("  (%1, %2): %3").arg(static_cast<int>(tb.box.front().x))
-            .arg(static_cast<int>(tb.box.front().y))
-                .arg(QString::fromStdString(tb.text));
+            m_logger.log(std::format("  ({}, {}): {}\n", static_cast<int>(tb.box.front().x),
+                                                       static_cast<int>(tb.box.front().y),
+                                                       tb.text));
         }
     }
 
-    qDebug().noquote() << "-------------------\n";
+    m_logger.log("-------------------\n");
 }
 
 
@@ -1635,7 +1639,7 @@ std::optional<cv::Point2f> OnnxStampRecognizer::
 
     if(doc.number.empty())
     {
-        qWarning().noquote() << "OnnxStampRecognizer::locateDecimalNumber: Decimal number not found.";
+        m_logger.log("OnnxStampRecognizer::locateDecimalNumber: Decimal number not found.\n");
         return std::nullopt;
     }
 
@@ -2113,14 +2117,13 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
 {
     if(!m_initialized)
     {
-        std::cerr << "[OpenCV-DNN] ERROR: Recognizer is not initialized.\n" << std::flush;
+        m_logger.log("[OpenCV-DNN] ERROR: Recognizer is not initialized.\n");
         return std::nullopt;
     }
 
     try
     {
-        qDebug().noquote() << "[OpenCV-DNN] 1. Start recognizing:"
-                           << QString::fromStdString(imagePath.string());
+        m_logger.log(std::format("[OpenCV-DNN] 1. Start recognizing: {}\n", imagePath.string()));
 
         // Этап 1. Подготовить единый кроп штампа и координаты его правого нижнего угла.
         const auto prepared{ prepareStampImage(imagePath) };
@@ -2164,18 +2167,17 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
         extractProductName(boxes, *numPos, prepared.bottomRightCorner, formType, doc);
         extractSheetNumbers(prepared.bgrMat, boxes, prepared.bottomRightCorner, formType, doc);
 
-        qDebug().noquote()
-            << QString("[OpenCV-DNN] PARSED -> Form: %1 | Number: [%2] | Name: [%3] | Sheet: %4/%5")
-                   .arg(static_cast<int>(formType))
-                   .arg(QString::fromStdString(doc.number))
-                   .arg(QString::fromStdString(doc.name))
-                   .arg(doc.sheet)
-                   .arg(doc.totalSheets);
+        m_logger.log(std::format("[OpenCV-DNN] PARSED -> Form: {} | Number: [{}] | Name: [{}] | Sheet: {}/{}\n",
+                   static_cast<int>(formType),
+                   doc.number,
+                   doc.name,
+                   doc.sheet,
+                   doc.totalSheets));
 
         // Этап 9. Номер обязателен всегда; наименование обязательно только для Form1/Form2.
         if(doc.number.empty() || (formType != StampFormType::Form2a && doc.name.empty()))
         {
-            qWarning().noquote() << "OnnxStampRecognizer::recognize: Failed to parse text.";
+            m_logger.log("OnnxStampRecognizer::recognize: Failed to parse text.\n");
             return std::nullopt;
         }
 
@@ -2183,7 +2185,7 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
     }
     catch(const std::exception& e)
     {
-        std::cerr << "OnnxStampRecognizer::recognize: Error: " << e.what() << "\n" << std::flush;
+        m_logger.log(std::format("OnnxStampRecognizer::recognize: Error: {}\n", e.what()));
         return std::nullopt;
     }
 }

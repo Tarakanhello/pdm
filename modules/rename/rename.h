@@ -14,6 +14,7 @@
 #include "istamp_recognizer.h"
 #include "module_id.h"
 #include "rename_logger.h"
+#include "diagnosnostic_sink.h"
 
 namespace pdm::modules
 {
@@ -27,6 +28,7 @@ namespace pdm::modules
     class Rename final : public shared::IModule
     {
     private:
+        shared::diagnostic::Logger& m_logger{ shared::diagnostic::Logger::instance() };
         /**
          * @brief Внутреннее состояние процесса переименования.
          *

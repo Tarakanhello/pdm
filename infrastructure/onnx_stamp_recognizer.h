@@ -14,6 +14,7 @@
 #include <opencv2/dnn.hpp>
 
 #include "istamp_recognizer.h"
+#include "diagnosnostic_sink.h"
 
 namespace pdm::infrastructure
 {
