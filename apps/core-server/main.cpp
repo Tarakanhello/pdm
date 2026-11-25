@@ -3,7 +3,7 @@
 
 #include "build_core.h"
 #include "job_params.h"
-#include "diagnosnostic_sink.h"
+#include "logger.h"
 
 #include "rename_keys.h" // Включаем только ключи, не включая сам модуль!
 
@@ -29,7 +29,7 @@ int main()
 
     auto& logger{ pdm::shared::diagnostic::Logger::instance() };
 
-    logger.init("C:/Users/TarakanovVV/Downloads/someTestFiles/scans");
+    logger.init("logs");
 
     logger.log("=== Run PDM System ===\n");
 

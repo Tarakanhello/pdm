@@ -1388,7 +1388,7 @@ OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
         std::ifstream dictFile(modelsDir / "cyrillic_dict.txt");
         if(!dictFile.is_open())
         {
-            m_logger.log("[OpenCV-DNN] ERROR: Cannot open cyrillic_dict.txt!\n");
+            m_logger.error("[OpenCV-DNN] ERROR: Cannot open cyrillic_dict.txt!\n");
             return;
         }
 
@@ -1422,7 +1422,7 @@ OnnxStampRecognizer::OnnxStampRecognizer(const std::filesystem::path& modelsDir)
     }
     catch (const std::exception& e)
     {
-        m_logger.log(std::format("[OpenCV-DNN] Init exception: {}\n", e.what()));
+        m_logger.error(std::format("[OpenCV-DNN] Init exception: {}\n", e.what()));
         m_initialized = false;
     }
 }
@@ -1481,7 +1481,7 @@ OnnxStampRecognizer::PreparedStamp OnnxStampRecognizer::prepareStampImage(const 
     }
     else
     {
-        m_logger.log(std::format("[OpenCV-DNN] Stamp frame corner not found, using fallback crop for: {}\n", imagePath.filename().string()));
+        m_logger.warning(std::format("[OpenCV-DNN] Stamp frame corner not found, using fallback crop for: {}\n", imagePath.filename().string()));
     }
 
     const int safeW{ std::min(cropW, scanW - cropX) };
@@ -1556,7 +1556,7 @@ std::vector<OnnxStampRecognizer::TextBox> OnnxStampRecognizer::detectTextBoxes(c
     cv::Mat detOut{ m_detNet.forward() };
     if(detOut.empty() || detOut.total() < static_cast<size_t>(kDetInputHeight) * kDetInputWidth)
     {
-        m_logger.log("[OpenCV-DNN] ERROR: Invalid detOut shape!\n");
+        m_logger.error("[OpenCV-DNN] ERROR: Invalid detOut shape!\n");
         return {};
     }
 
@@ -1639,7 +1639,7 @@ std::optional<cv::Point2f> OnnxStampRecognizer::
 
     if(doc.number.empty())
     {
-        m_logger.log("OnnxStampRecognizer::locateDecimalNumber: Decimal number not found.\n");
+        m_logger.warning("OnnxStampRecognizer::locateDecimalNumber: Decimal number not found.\n");
         return std::nullopt;
     }
 
@@ -2117,7 +2117,7 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
 {
     if(!m_initialized)
     {
-        m_logger.log("[OpenCV-DNN] ERROR: Recognizer is not initialized.\n");
+        m_logger.error("[OpenCV-DNN] ERROR: Recognizer is not initialized.\n");
         return std::nullopt;
     }
 
@@ -2177,7 +2177,7 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
         // Этап 9. Номер обязателен всегда; наименование обязательно только для Form1/Form2.
         if(doc.number.empty() || (formType != StampFormType::Form2a && doc.name.empty()))
         {
-            m_logger.log("OnnxStampRecognizer::recognize: Failed to parse text.\n");
+            m_logger.warning("OnnxStampRecognizer::recognize: Failed to parse text.\n");
             return std::nullopt;
         }
 
@@ -2185,7 +2185,7 @@ std::optional<shared::Document> OnnxStampRecognizer::recognize(const std::filesy
     }
     catch(const std::exception& e)
     {
-        m_logger.log(std::format("OnnxStampRecognizer::recognize: Error: {}\n", e.what()));
+        m_logger.error(std::format("OnnxStampRecognizer::recognize: Error: {}\n", e.what()));
         return std::nullopt;
     }
 }

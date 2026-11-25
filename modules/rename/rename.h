@@ -14,7 +14,7 @@
 #include "istamp_recognizer.h"
 #include "module_id.h"
 #include "rename_logger.h"
-#include "diagnosnostic_sink.h"
+#include "logger.h"
 
 namespace pdm::modules
 {

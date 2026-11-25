@@ -64,7 +64,7 @@ void Rename::execute(const shared::JobParams& params)
     // Проверяем, передало ли ядро нужные пути
     if(!params.has(rename::keys::scansFolder))
     {
-        m_logger.log("[RenameModule] Error: paths ways has not found!\n");
+        m_logger.error("[RenameModule] Error: paths ways has not found!\n");
         return;
     }
 
@@ -78,7 +78,7 @@ void Rename::execute(const shared::JobParams& params)
     }
     catch(const std::exception& e)
     {
-        m_logger.log(std::format("{}\n",e.what()));
+        m_logger.error(std::format("{}\n",e.what()));
         return;
     }
 

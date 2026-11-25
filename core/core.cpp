@@ -14,7 +14,7 @@ namespace pdm
         // Проверяем, есть ли уже модуль с таким ID
         if(m_modules.contains(id))
         {
-            m_logger.log(std::format("[Core] Warning: Module with ID [{}] is already registered!\n",
+            m_logger.warning(std::format("[Core] Warning: Module with ID [{}] is already registered!\n",
                                     shared::idToString(id)));
             return;
         }
@@ -29,14 +29,14 @@ namespace pdm
         auto opId{ shared::ParseModuleId(moduleName) };
         if(!opId)
         {
-            m_logger.log(std::format("[Core] Error: Module with name [{}] not found.\n", moduleName));
+            m_logger.error(std::format("[Core] Error: Module with name [{}] not found.\n", moduleName));
             return;
         }
         auto it{ m_modules.find(*opId) };
 
         if(it == m_modules.end())
         {
-            m_logger.log(std::format("[Core] Error: Module with ID [{}] not found.\n", shared::idToString(*opId)));
+            m_logger.error(std::format("[Core] Error: Module with ID [{}] not found.\n", shared::idToString(*opId)));
             return;
         }
 
