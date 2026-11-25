@@ -3,7 +3,7 @@
 
 #include "build_core.h"
 #include "job_params.h"
-#include "diagnosnostic_sink.h"
+#include "diagnostic/logger.h"
 
 #include "rename_keys.h" // Включаем только ключи, не включая сам модуль!
 
@@ -28,10 +28,8 @@ int main()
 #endif
 
     auto& logger{ pdm::shared::diagnostic::Logger::instance() };
-
-    logger.init("C:/Users/TarakanovVV/Downloads/someTestFiles/scans");
-
-    logger.log("=== Run PDM System ===\n");
+    logger.init(std::filesystem::path{ constants::kScansFolderPath } / "logs");
+    logger.info("=== Run PDM System ===\n");
 
     // 1. Создаем Ядро
     auto core{ pdm::composition::BuildCore() };
@@ -45,7 +43,7 @@ int main()
     // 3. Просим ядро запустить модуль по его ID
     core->runModule("rename", params);
 
-    logger.log("=== Close PDM System ===\n");
+    logger.info("=== Close PDM System ===\n");
 
     return 0;
 }

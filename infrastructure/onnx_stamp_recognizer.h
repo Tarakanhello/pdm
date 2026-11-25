@@ -14,7 +14,7 @@
 #include <opencv2/dnn.hpp>
 
 #include "istamp_recognizer.h"
-#include "diagnosnostic_sink.h"
+#include "diagnostic/logger.h"
 
 namespace pdm::infrastructure
 {
@@ -52,8 +52,10 @@ namespace pdm::infrastructure
 class OnnxStampRecognizer final : public shared::IStampRecognizer
 {
 private:
+    shared::diagnostic::Logger& m_logger{ shared::diagnostic::Logger::instance() };
+
     cv::dnn::Net m_detNet;              ///< Нейросеть детектора текстовых областей (DBNet).
-    // cv::dnn::Net m_clsNet;              ///< Нейросеть классификатора ориентации текста.
+    // cv::dnn::Net m_clsNet;           ///< Нейросеть классификатора ориентации текста.
     cv::dnn::Net m_recNet;              ///< Нейросеть распознавания символов в текстовых строках (CRNN/SVTR).
     std::vector<std::string> m_keys;    ///< Словарь символов для декодирования CTC-выхода модели.
     bool m_initialized{ false };        ///< Флаг успешной загрузки моделей и словаря.
@@ -295,7 +297,7 @@ private:
          * @param doc Заполняемая структура документа.
          * @return Координаты левого верхнего угла блока номера (`cv::Point2f`) или `std::nullopt`, если номер не найден.
          */
-    static std::optional<cv::Point2f> locateDecimalNumber(const std::vector<TextBox>& boxes,
+    std::optional<cv::Point2f> locateDecimalNumber(const std::vector<TextBox>& boxes,
                                                           const cv::Point2f& corner,
                                                           shared::Document& doc);
 

@@ -10,7 +10,7 @@
 #include "imodule.h"
 #include "job_params.h"
 
-#include "diagnosnostic_sink.h"
+#include "diagnostic/logger.h"
 
 namespace pdm
 {
