@@ -353,6 +353,61 @@ StampLineSegments extractStampLineSegments(const cv::Mat& zone, int searchRight,
     return { hSegs, vSegs };
 }
 
+
+// Отсеивает фрагменты, которые по сути являются датой, номером или их шумовым
+// огрызком: цифр >= 2 и при этом кириллических букв <= 2. Такие блоки не должны
+// попадать в наименование, даже если OCR выдал в них отдельные кириллические
+// гомоглифы ('О' вместо '0', 'С' вместо '(', 'З' вместо '3' и т.п.).
+static bool isDateOrNumberLike(const std::string& s)
+{
+    int digits{ 0 };
+    int cyrillic{ 0 };
+
+    for (size_t i{ 0 }; i < s.size(); )
+    {
+        const auto c{ static_cast<unsigned char>(s[i]) };
+        if (c < 0x80)
+        {
+            if (std::isdigit(c))
+            {
+                ++digits;
+            }
+            ++i;
+        }
+        else if ((c == 0xD0 || c == 0xD1) && (i + 1) < s.size())
+        {
+            ++cyrillic;
+            i += 2;
+        }
+        else
+        {
+            ++i;
+        }
+    }
+
+    return digits >= 2 && cyrillic <= 2;
+}
+
+// Короткий обрывок, начинающийся с цифры и содержащий кириллицу
+// (например, "0гу", "2отв", "1ов", "3го"), — это, как правило, шум
+// из соседней графы штампа или остаток от линии рамки, а не часть
+// наименования. Осмысленные обозначения ("10ХСНД", "20ХН3А") длиннее
+// и порог не проходят; материал же всё равно отсекается через
+// isStopWord() по маркеру "ГОСТ".
+static bool isMixedDigitLetterJunk(const std::string& s)
+{
+    if (s.size() < 3 || s.size() > 6)
+    {
+        return false;
+    }
+    if (!std::isdigit(static_cast<unsigned char>(s.front())))
+    {
+        return false;
+    }
+    return s.find('\xD0') != std::string::npos ||
+           s.find('\xD1') != std::string::npos;
+}
+
 } // namespace
 
 
@@ -1303,7 +1358,20 @@ bool OnnxStampRecognizer::isStopWord(const std::string& s)
             s.find("loma") != std::string::npos ||
             s.find("lomo") != std::string::npos ||
             s.find("Дoma") != std::string::npos ||
-            s == "ит" || s == "ата" || s == "Аит" || s == "Лит")
+            s.find("1ата") != std::string::npos ||
+            s.find("1amа") != std::string::npos ||
+            s.find("1am")  != std::string::npos ||
+            s.find("Лamd") != std::string::npos ||
+            s.find("Латd") != std::string::npos ||
+            s.find("!oma") != std::string::npos ||
+            s.find("lатd") != std::string::npos ||
+            s.find("lamd") != std::string::npos ||
+            s.find("amа]") != std::string::npos ||
+            s.find("dатd") != std::string::npos ||
+            s.find("lата") != std::string::npos ||
+            s.find("отg") != std::string::npos ||
+            s.find("1в.с7Х") != std::string::npos ||
+            s == "ит" || s == "ата" || s == "Аит" || s == "Лит" || s == "ао" || s == "оа")
         {
             return true;
         }
@@ -1714,7 +1782,18 @@ void OnnxStampRecognizer::extractProductName(const std::vector<TextBox>& boxes,
         }
 
         std::string cleanedPart{ cleanRussianName(line) };
+
         detectDocumentCode(cleanedPart, doc.code);
+
+        if (isDateOrNumberLike(cleanedPart))
+        {
+            continue;
+        }
+
+        if (isMixedDigitLetterJunk(cleanedPart))
+        {
+            continue;
+        }
 
         const bool hasCyrillic{ cleanedPart.find('\xD0') != std::string::npos ||
                                cleanedPart.find('\xD1') != std::string::npos };
